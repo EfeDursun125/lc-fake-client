@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/DirectorClock.cs" Link="DirectorClock.cs" />
+    <Compile Include="../../src/MovementPolicy.cs" Link="MovementPolicy.cs" />
+    <Compile Include="../../src/NutcrackerPolicy.cs" Link="NutcrackerPolicy.cs" />
+    <Compile Include="../../src/SpikeTimingPolicy.cs" Link="SpikeTimingPolicy.cs" />
+  </ItemGroup>
+</Project>
