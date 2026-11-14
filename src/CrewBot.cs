@@ -18,6 +18,7 @@ internal sealed class CrewBot : IDisposable, IBot
     private readonly Director director;
     private readonly NavMeshAgent agent;
     private readonly NavMeshPath path = new NavMeshPath();
+    private readonly NavMeshPath directPath = new NavMeshPath();
     private readonly NavMeshPath candidatePath = new NavMeshPath();
     private readonly NavMeshPath spikeDetourPath = new NavMeshPath();
     private readonly Vector3[] corners = new Vector3[48];
@@ -2686,6 +2687,7 @@ internal sealed class CrewBot : IDisposable, IBot
             RouteFailed();
             return;
         }
+        Plugin.TeleportBotForFacility(Body, landing);
 
         if (portal.entranceId == 0)
             portal.FinishOpeningEntrance(true);
@@ -2733,6 +2735,7 @@ internal sealed class CrewBot : IDisposable, IBot
                 held.isInFactory = intoFactory;
         if (Body.ItemOnlySlot != null)
             Body.ItemOnlySlot.isInFactory = intoFactory;
+        Plugin.SyncBotFacilityTeleport(Body, landing, intoFactory);
         ResetPath();
         nextRoute = 0f;
         director.RequestReplan();
@@ -3051,8 +3054,13 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
 
-        if (now < nextRoute || !fleeing && !elevatorStation && TryRiskWeightedRoute(goal, now) ||
-            !fleeing && !elevatorStation && TryRouteWaypoint(goal, now) || TryRoute(goal, now, fleeing))
+        if (now < nextRoute)
+            return;
+        bool hasDirectPath = false;
+        Vector3 directDestination = default;
+        if (!fleeing && !elevatorStation && TryRiskWeightedRoute(goal, now, out hasDirectPath, out directDestination) ||
+            !fleeing && !elevatorStation && TryRouteWaypoint(goal, now, hasDirectPath ? directPath : null, directDestination) ||
+            TryRoute(goal, now, fleeing, preparedPath: hasDirectPath ? directPath : null, preparedDestination: directDestination))
             return;
         if (director.OpenNearbyDoor(this, goal, now, fleeing))
             nextRoute = now + 0.6f;
@@ -3060,11 +3068,16 @@ internal sealed class CrewBot : IDisposable, IBot
             RecoverRoute(goal, now);
     }
 
-    private bool TryRiskWeightedRoute(Vector3 goal, float now)
+    private bool TryRiskWeightedRoute(Vector3 goal, float now, out bool hasDirectPath, out Vector3 directDestination)
     {
+        hasDirectPath = false;
+        directDestination = default;
         if (!NavMesh.SamplePosition(goal, out var destination, 2f, agent.areaMask) ||
-            !agent.CalculatePath(destination.position, candidatePath) || candidatePath.status != NavMeshPathStatus.PathComplete ||
-            !EvaluateRiskPath(candidatePath, now, out float directCost, out float directRisk, out Vector3 danger, false) ||
+            !agent.CalculatePath(destination.position, directPath) || directPath.status != NavMeshPathStatus.PathComplete)
+            return false;
+        hasDirectPath = true;
+        directDestination = destination.position;
+        if (!EvaluateRiskPath(directPath, now, out float directCost, out float directRisk, out Vector3 danger, false) ||
             directRisk < 0.15f)
             return false;
 
@@ -3182,14 +3195,21 @@ internal sealed class CrewBot : IDisposable, IBot
         return true;
     }
 
-    private bool TryRouteWaypoint(Vector3 goal, float now)
+    private bool TryRouteWaypoint(Vector3 goal, float now, NavMeshPath? preparedPath, Vector3 preparedDestination)
     {
-        if ((Position - goal).sqrMagnitude < 9f || order.Kind == TaskKind.Escort || order.Kind == TaskKind.Evade ||
-            !NavMesh.SamplePosition(goal, out var destination, 2f, agent.areaMask) ||
-            !agent.CalculatePath(destination.position, candidatePath) || candidatePath.status != NavMeshPathStatus.PathComplete)
+        if ((Position - goal).sqrMagnitude < 9f || order.Kind == TaskKind.Escort || order.Kind == TaskKind.Evade)
             return false;
+        Vector3 destination = preparedDestination;
+        NavMeshPath route = preparedPath ?? candidatePath;
+        if (preparedPath == null)
+        {
+            if (!NavMesh.SamplePosition(goal, out var hit, 2f, agent.areaMask) ||
+                !agent.CalculatePath(hit.position, route) || route.status != NavMeshPathStatus.PathComplete)
+                return false;
+            destination = hit.position;
+        }
 
-        int count = candidatePath.GetCornersNonAlloc(corners);
+        int count = route.GetCornersNonAlloc(corners);
         if (count < 2 || count == corners.Length)
             return false;
         Vector3 firstCorner = corners[1];
@@ -3211,7 +3231,7 @@ internal sealed class CrewBot : IDisposable, IBot
                 previousCorner = corner;
                 hasPreviousCorner = true;
                 Vector3 rounded = corner + edge.normal * (agent.radius + 0.6f) + outgoing.normalized * 0.8f;
-                if (StartWaypoint(rounded, goal, destination.position, firstDirection, directLength, now))
+                if (StartWaypoint(rounded, goal, destination, firstDirection, directLength, now))
                     return true;
             }
         }
@@ -3230,7 +3250,7 @@ internal sealed class CrewBot : IDisposable, IBot
         Vector3 direction = segment / length;
         Vector3 side = Vector3.Cross(Vector3.up, direction);
         Vector3 staggered = Position + direction * Mathf.Min(length * 0.6f, 7f) + side * (lane * 0.65f);
-        return StartWaypoint(staggered, goal, destination.position, firstDirection, directLength, now);
+        return StartWaypoint(staggered, goal, destination, firstDirection, directLength, now);
     }
 
     private static float PathLength(Vector3[] points, int count)
@@ -3310,25 +3330,32 @@ internal sealed class CrewBot : IDisposable, IBot
         RouteFailed();
     }
 
-    private bool TryRoute(Vector3 goal, float now, bool fleeing, Turret? ignoredTurret = null, EnemyAI? ignoredEnemy = null)
+    private bool TryRoute(Vector3 goal, float now, bool fleeing, Turret? ignoredTurret = null, EnemyAI? ignoredEnemy = null,
+        NavMeshPath? preparedPath = null, Vector3 preparedDestination = default)
     {
-        if (!NavMesh.SamplePosition(goal, out var hit, 2f, agent.areaMask) ||
-            !agent.CalculatePath(hit.position, path))
-            return false;
+        NavMeshPath route = preparedPath ?? path;
+        Vector3 destination = preparedDestination;
+        if (preparedPath == null)
+        {
+            if (!NavMesh.SamplePosition(goal, out var hit, 2f, agent.areaMask) ||
+                !agent.CalculatePath(hit.position, route))
+                return false;
+            destination = hit.position;
+        }
 
-        int count = path.GetCornersNonAlloc(corners);
+        int count = route.GetCornersNonAlloc(corners);
         if (count == corners.Length || count == 0)
             return false;
-        if (path.status != NavMeshPathStatus.PathComplete &&
-            TryBridgePartialPath(hit.position, corners[count - 1], Inside, now) &&
-            agent.CalculatePath(hit.position, path))
+        if (route.status != NavMeshPathStatus.PathComplete &&
+            TryBridgePartialPath(destination, corners[count - 1], Inside, now) &&
+            agent.CalculatePath(destination, route))
         {
-            count = path.GetCornersNonAlloc(corners);
+            count = route.GetCornersNonAlloc(corners);
             if (count == 0 || count == corners.Length)
                 return false;
         }
         DoorLock? blockedDoor = null;
-        if (path.status != NavMeshPathStatus.PathComplete)
+        if (route.status != NavMeshPathStatus.PathComplete)
         {
             if (!(Body.currentlyHeldObjectServer is KeyItem) && body.FindItem<LockPicker>() == null)
                 return false;
@@ -3338,9 +3365,9 @@ internal sealed class CrewBot : IDisposable, IBot
             if ((corners[count - 1] - blockedDoor.transform.position).sqrMagnitude > 6.25f)
             {
                 if (!NavMesh.SamplePosition(blockedDoor.transform.position, out var approach, 2.4f, agent.areaMask) ||
-                    !agent.CalculatePath(approach.position, path) || path.status != NavMeshPathStatus.PathComplete)
+                    !agent.CalculatePath(approach.position, route) || route.status != NavMeshPathStatus.PathComplete)
                     return false;
-                count = path.GetCornersNonAlloc(corners);
+                count = route.GetCornersNonAlloc(corners);
                 if (count == 0 || count == corners.Length)
                     return false;
             }
@@ -3364,7 +3391,7 @@ internal sealed class CrewBot : IDisposable, IBot
                     if (now >= nextSpikeDetour)
                     {
                         nextSpikeDetour = now + 2f;
-                        if (TrySpikeDetour(spike, hit.position, now))
+                        if (TrySpikeDetour(spike, destination, now))
                             return true;
                     }
                     return false;
@@ -3432,7 +3459,7 @@ internal sealed class CrewBot : IDisposable, IBot
             }
         }
 
-        if (!agent.SetPath(path))
+        if (!agent.SetPath(route))
             return false;
 
         if (!Inside && !Aboard && !fleeing && (Position - goal).sqrMagnitude >= 64f &&
@@ -3834,6 +3861,7 @@ internal sealed class CrewBot : IDisposable, IBot
     {
         if (Inside || !agent.enabled || !agent.isOnNavMesh || !agent.Warp(position))
             return false;
+        Plugin.TeleportBotForFacility(Body, position);
         CloseOpeningPortal();
         Body.isInsideFactory = true;
         enteredAt = now;
@@ -3845,6 +3873,7 @@ internal sealed class CrewBot : IDisposable, IBot
                 held.isInFactory = true;
         if (Body.ItemOnlySlot != null)
             Body.ItemOnlySlot.isInFactory = true;
+        Plugin.SyncBotFacilityTeleport(Body, position, true);
         body.Pose(position, Body.transform.rotation, false, true, false);
         Assign(new Order(TaskKind.Hold, position, true));
         director.PlanEscape(this, now, true);

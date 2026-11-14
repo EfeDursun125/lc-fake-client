@@ -20,7 +20,9 @@ The session owns the Director and bot instances until round cleanup. Before the 
 
 Optional enemy collision methods are discovered once per loaded assembly; later assembly-load notifications are queued and patched on the game thread. Patch failures remain isolated to the affected optional method.
 
-Protocol v12 binds messages to a random host-session token, a round generation, and a monotonically increasing bot-slot generation. A reliable challenge/response initializes each peer; snapshots establish slot generations before reliable events. All bot messages share the same reliable sequenced delivery. Retired generations accept late cleanup events but cannot be recreated by old snapshots. A closed round rejects its old generation after landing.
+Protocol v13 binds messages to a random host-session token, a round generation, and a monotonically increasing bot-slot generation. A reliable challenge/response initializes each peer; snapshots establish slot generations before reliable events. All bot messages share the same reliable sequenced delivery. Retired generations accept late cleanup events but cannot be recreated by old snapshots. A closed round rejects its old generation after landing.
+
+Facility transitions validate and warp the host navigation agent, invoke the game's player teleport lifecycle without interrupting the host terminal, and reliably notify peers to run the same lifecycle at the authoritative landing position. The bot teleport hook is suppressed only during these calls so ordinary ship teleport handling remains intact.
 
 | State | Key and lifetime | Invalidation / bound |
 | --- | --- | --- |
@@ -41,6 +43,8 @@ Bots sharing a mineshaft trip board assigned positions and the controlling bot w
 Partial NavMesh paths may be bridged by bounded jump searches around multiple candidate edges and elevations; partial routes beyond the landing must make progress, and both sampled endpoints and the airborne arc are checked before a shared jump link is created. Indoor links cannot cross cached door locations, and existing links are checked again before traversal. Corner waypoints maintain clearance based on the agent radius when a safe route exists.
 
 For ordinary travel, bots compare complete NavMesh routes through bounded alternate waypoints by length and shared risk, including observed enemies, environmental hazards, death locations, and spike crossings. They validate both legs against existing hazards and keep immediate escape behavior separate. Existing door carving is temporarily adjusted, and broken bridges and quicksand retain shared carving.
+
+Each bot keeps a reusable direct-path buffer. A complete path computed for risk scoring is reused only within the same movement decision for waypoint evaluation and final route validation; partial paths and emergency routes retain the normal fresh-search fallback.
 
 Hive selection and pickup check cached Circuit Bee instances and their runtime hive references; a nearby active, non-departing swarm temporarily excludes that hive while unguarded hives remain eligible. Area hazards, mines and turrets use bot-specific risk checks and periodic short-range route validation without carving the shared NavMesh. Broken bridges and quicksand retain temporary carving obstacles, which are destroyed with the hazard tracker. Bots inside a hazard may route toward lower risk. Bots discard carried flashlights aboard using the existing synchronized inventory drop path.
 

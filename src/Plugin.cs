@@ -20,6 +20,7 @@ public sealed class Plugin : BaseUnityPlugin
     private static int lastPumpFrame = -1;
     private static bool loggedPump;
     private static BotDriver? driver;
+    private static PlayerControllerB? facilityTeleportPlayer;
 
     private void Awake()
     {
@@ -112,12 +113,35 @@ public sealed class Plugin : BaseUnityPlugin
 
     internal static void BeforeTeleport(PlayerControllerB player)
     {
+        if (facilityTeleportPlayer == player)
+            return;
         if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsHost && player.shipTeleporterId == 1 &&
             BotBody.TryGet(player, out var body))
             body.DropAll();
     }
 
-    internal static void AfterTeleport(PlayerControllerB player, Vector3 position) => session?.BotTeleported(player, position);
+    internal static void AfterTeleport(PlayerControllerB player, Vector3 position)
+    {
+        if (facilityTeleportPlayer != player)
+            session?.BotTeleported(player, position);
+    }
+
+    internal static void TeleportBotForFacility(PlayerControllerB player, Vector3 position)
+    {
+        var previous = facilityTeleportPlayer;
+        facilityTeleportPlayer = player;
+        try
+        {
+            player.TeleportPlayer(position, allowInteractTrigger: true);
+        }
+        finally
+        {
+            facilityTeleportPlayer = previous;
+        }
+    }
+
+    internal static void SyncBotFacilityTeleport(PlayerControllerB player, Vector3 position, bool inside) =>
+        session?.SendFacilityTeleport(player, position, inside);
 
     internal static bool BotsSurvivedDeparture => session?.BotsSurvivedDeparture == true;
 

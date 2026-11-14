@@ -17,7 +17,8 @@ internal sealed class Session : IDisposable
     private const string EmoteMessage = "LethalFakeClient.Director.v10.Emote";
     private const string IdentityMessage = "LethalFakeClient.Director.v11.Identity";
     private const string WelcomeMessage = "LethalFakeClient.Director.v12.Welcome";
-    private const byte ProtocolVersion = 12;
+    private const string FacilityMessage = "LethalFakeClient.Director.v13.Facility";
+    private const byte ProtocolVersion = 13;
     private const int HeaderBytes = sizeof(ulong) + sizeof(uint);
     private const int SlotBytes = sizeof(int) + sizeof(ulong);
     private const int MaxBots = 128;
@@ -104,6 +105,7 @@ internal sealed class Session : IDisposable
             network.CustomMessagingManager.RegisterNamedMessageHandler(DropMessage, ReceiveDroppedItem);
             network.CustomMessagingManager.RegisterNamedMessageHandler(EmoteMessage, ReceiveBotEmote);
             network.CustomMessagingManager.RegisterNamedMessageHandler(IdentityMessage, ReceiveIdentity);
+            network.CustomMessagingManager.RegisterNamedMessageHandler(FacilityMessage, ReceiveFacilityTeleport);
         }
     }
 
@@ -181,6 +183,55 @@ internal sealed class Session : IDisposable
         var name = new FixedString128Bytes(value);
         packet.WriteValueSafe(name);
         Network.CustomMessagingManager.SendNamedMessage(IdentityMessage, client, packet, NetworkDelivery.ReliableFragmentedSequenced);
+    }
+
+    internal void SendFacilityTeleport(PlayerControllerB player, Vector3 position, bool inside)
+    {
+        int slot = (int)player.playerClientId;
+        if (!Network.IsHost || !Network.IsListening || Network.ShutdownInProgress || !slotGenerations.ContainsKey(slot))
+            return;
+        recipients.Clear();
+        foreach (ulong client in Network.ConnectedClientsIds)
+            if (client != NetworkManager.ServerClientId && peers.Contains(client))
+                recipients.Add(client);
+        if (recipients.Count == 0)
+            return;
+        using var packet = new FastBufferWriter(HeaderBytes + SlotBytes + sizeof(float) * 3 + sizeof(byte), Allocator.Temp);
+        WriteHeader(packet);
+        WriteSlot(packet, slot);
+        packet.WriteValueSafe(position);
+        packet.WriteValueSafe((byte)(inside ? 1 : 0));
+        Network.CustomMessagingManager.SendNamedMessage(FacilityMessage, recipients, packet, NetworkDelivery.ReliableFragmentedSequenced);
+    }
+
+    private void ReceiveFacilityTeleport(ulong sender, FastBufferReader packet)
+    {
+        if (!ReadHeader(sender, packet, SlotBytes + sizeof(float) * 3 + sizeof(byte)) ||
+            !ReadSlot(packet, false, out int slot, out _))
+            return;
+        packet.ReadValueSafe(out Vector3 position);
+        packet.ReadValueSafe(out byte flags);
+        var player = StartOfRound.Instance.allPlayerScripts[slot];
+        if (player == null || player.isPlayerDead || retired.Contains(player) ||
+            float.IsNaN(position.x) || float.IsNaN(position.y) || float.IsNaN(position.z) ||
+            float.IsInfinity(position.x) || float.IsInfinity(position.y) || float.IsInfinity(position.z))
+            return;
+        bool inside = (flags & 1) != 0;
+        Plugin.TeleportBotForFacility(player, position);
+        player.isInsideFactory = inside;
+        player.isInElevator = false;
+        player.isInHangarShipRoom = false;
+        foreach (var held in player.ItemSlots)
+            if (held != null)
+                held.isInFactory = inside;
+        if (player.ItemOnlySlot != null)
+            player.ItemOnlySlot.isInFactory = inside;
+        if (replicas.TryGetValue(slot, out var replica))
+        {
+            replica.Point = position;
+            replica.Flags = (byte)((replica.Flags & ~6) | (inside ? 2 : 0));
+            replica.ShipAnchored = false;
+        }
     }
 
     private void ReceiveIdentity(ulong sender, FastBufferReader packet)
@@ -1122,6 +1173,7 @@ internal sealed class Session : IDisposable
             Network.CustomMessagingManager?.UnregisterNamedMessageHandler(DropMessage);
             Network.CustomMessagingManager?.UnregisterNamedMessageHandler(EmoteMessage);
             Network.CustomMessagingManager?.UnregisterNamedMessageHandler(IdentityMessage);
+            Network.CustomMessagingManager?.UnregisterNamedMessageHandler(FacilityMessage);
         }
         EndRound();
         ClearReplicas();

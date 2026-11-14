@@ -52,7 +52,7 @@ byte[] oldBot = GenerationPacket(300, 1, 4, 1);
 byte[] replacement = GenerationPacket(300, 1, 4, 2);
 Check(AcceptPacket(packetState, oldBot, true) && AcceptPacket(packetState, replacement, true),
     "serialized snapshots establish replacement generation");
-foreach (string kind in new[] { "death", "drop", "identity", "emote", "state" })
+foreach (string kind in new[] { "death", "drop", "identity", "emote", "facility teleport", "state" })
     Check(!AcceptPacket(packetState, oldBot, kind == "state"), $"serialized stale {kind} rejected after slot reuse");
 packetState.CloseRound();
 Check(!AcceptPacket(packetState, replacement, true) && AcceptPacket(packetState, GenerationPacket(300, 2, 4, 3), true),
