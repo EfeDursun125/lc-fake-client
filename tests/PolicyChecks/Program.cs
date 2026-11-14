@@ -10,6 +10,10 @@ static void Check(bool result, string name)
 
 Check(AreaHazardPolicy.Proximity(5f, 0f, 5f) >= 0.5f && AreaHazardPolicy.Proximity(7f, 0f, 5f) == 0f, "bee hazard has a bounded danger radius");
 Check(AreaHazardPolicy.CanTraverse(0.8f, 1f, true) && !AreaHazardPolicy.CanTraverse(0.8f, 0f, false), "bots can leave a danger area but avoid entering it");
+Check(!RoundStartPolicy.CanAcceptNewRound(false, true, false), "replicas remain closed in orbit");
+Check(!RoundStartPolicy.CanAcceptNewRound(true, false, true), "replicas remain closed during departure");
+Check(!RoundStartPolicy.CanAcceptNewRound(false, false, false), "replicas remain closed while landing");
+Check(RoundStartPolicy.CanAcceptNewRound(true, false, false), "replicas reopen after a new landing");
 Check(NutcrackerPolicy.HasTarget(2, 0, 4), "attacking nutcracker has a valid target");
 Check(!HoarderPolicy.IsHostile(0, false) && !HoarderPolicy.IsHostile(1, false), "passive hoarding bug is not a threat");
 Check(MeleePolicy.ShouldSwingMasked(2f, 10f), "masked inside immediate melee range");

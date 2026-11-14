@@ -33,6 +33,7 @@ internal sealed class Session : IDisposable
     private bool needsFill;
     private bool hadBotsThisRound;
     private bool departureStarted;
+    private bool replicaRoundClosed;
     internal bool BotsSurvivedDeparture { get; private set; }
     private float nextReconcile;
     private float nextSpawnWarning;
@@ -109,7 +110,7 @@ internal sealed class Session : IDisposable
     private void ReceiveBotEmote(ulong sender, FastBufferReader packet)
     {
         var round = StartOfRound.Instance;
-        if (sender != NetworkManager.ServerClientId || round == null || !packet.TryBeginRead(sizeof(int)))
+        if (replicaRoundClosed || sender != NetworkManager.ServerClientId || round == null || !packet.TryBeginRead(sizeof(int)))
             return;
         packet.ReadValueSafe(out int slot);
         if ((uint)slot >= (uint)round.allPlayerScripts.Length || round.ClientPlayerList.ContainsValue(slot))
@@ -524,7 +525,7 @@ internal sealed class Session : IDisposable
     private void ReceiveDeath(ulong sender, FastBufferReader packet)
     {
         var round = StartOfRound.Instance;
-        if (sender != NetworkManager.ServerClientId || round == null ||
+        if (replicaRoundClosed || sender != NetworkManager.ServerClientId || round == null ||
             !packet.TryBeginRead(sizeof(int) * 3 + sizeof(float) * 7 + sizeof(byte) + sizeof(ulong)))
             return;
         packet.ReadValueSafe(out int slot);
@@ -592,6 +593,7 @@ internal sealed class Session : IDisposable
             if (player != null && (StartOfRound.Instance == null || !StartOfRound.Instance.ClientPlayerList.ContainsValue((int)player.playerClientId)))
             {
                 BotAvatars.Remove(player);
+                player.isPlayerControlled = false;
                 player.isPlayerDead = false;
             }
         retired.Clear();
@@ -681,6 +683,10 @@ internal sealed class Session : IDisposable
 
     private void TickReplica(float now)
     {
+        var currentRound = StartOfRound.Instance;
+        if (replicaRoundClosed && currentRound != null && RoundStartPolicy.CanAcceptNewRound(
+            currentRound.shipHasLanded, currentRound.inShipPhase, currentRound.shipIsLeaving))
+            replicaRoundClosed = false;
         SendView(now);
         if (Network.IsConnectedClient && now >= nextPacket && now - lastPacket > 2f)
         {
@@ -773,7 +779,7 @@ internal sealed class Session : IDisposable
     private void ReceiveState(ulong sender, FastBufferReader packet)
     {
         var round = StartOfRound.Instance;
-        if (sender != NetworkManager.ServerClientId || round == null || !packet.TryBeginRead(sizeof(int)))
+        if (replicaRoundClosed || sender != NetworkManager.ServerClientId || round == null || !packet.TryBeginRead(sizeof(int)))
             return;
 
         packet.ReadValueSafe(out int count);
@@ -849,7 +855,11 @@ internal sealed class Session : IDisposable
         if (!Network.IsHost)
             return;
         foreach (var bot in bots)
+        {
+            if (bot.Died && bot.Body != null)
+                retired.Add(bot.Body);
             bot.Dispose();
+        }
         if (bots.Count > 0)
         {
             bots.Clear();
@@ -861,7 +871,7 @@ internal sealed class Session : IDisposable
 
     private void EndRound()
     {
-        if (!roundPrepared && director == null)
+        if (!roundPrepared && director == null && bots.Count == 0)
             return;
         Plugin.Log.LogInfo($"Bot round reset (prepared={roundPrepared}, director={director != null}).");
         var round = StartOfRound.Instance;
@@ -883,6 +893,8 @@ internal sealed class Session : IDisposable
 
     internal void BeforeRevive()
     {
+        if (!Network.IsHost)
+            replicaRoundClosed = true;
         EndRound();
         if (!Network.IsHost)
         {
@@ -890,8 +902,8 @@ internal sealed class Session : IDisposable
                 if (replica.Body.Player != null && replica.Body.Player.isPlayerDead)
                     retired.Add(replica.Body.Player);
             ClearReplicas();
-            ReleaseRetired();
         }
+        ReleaseRetired();
     }
 
     private void ClearReplicas()
@@ -899,7 +911,13 @@ internal sealed class Session : IDisposable
         pendingEmotes.Clear();
         foreach (var replica in replicas.Values)
         {
-            BotAvatars.Remove(replica.Body.Player);
+            var player = replica.Body.Player;
+            if (player != null)
+            {
+                if (player.isPlayerDead || replica.Body.Dead)
+                    retired.Add(player);
+                BotAvatars.Remove(player);
+            }
             replica.Body.Dispose();
         }
         replicas.Clear();

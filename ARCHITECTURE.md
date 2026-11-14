@@ -12,7 +12,7 @@ The host runs the bot Director and mechanics; peers render replicated player bod
 | `BotAvatars`, `ModelReplacementCompatibility` | Optional presentation compatibility. |
 | `EmoteCompatibility` | Optional BetterEmotes and LethalEmotesAPI discovery and playback; no hard dependency. |
 
-The session owns the Director and bot instances until round cleanup. Each bot owns its navigation agent and body wrapper. Unity state and the caches below are accessed on the game thread.
+The session owns the Director and bot instances until round cleanup. Before the game revives players, dead bot slots are retired and released on each peer so the game does not revive them as human players; clients reject late bot state and death messages until the next landing. Each bot owns its navigation agent and body wrapper. Unity state and the caches below are accessed on the game thread.
 
 | State | Key and lifetime | Invalidation / bound |
 | --- | --- | --- |
