@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace LethalFakeClient;
 
-[BepInPlugin("dev.lethalfakeclient", "Lethal Fake Client", "0.9.52")]
+[BepInPlugin("dev.lethalfakeclient", "Lethal Fake Client", "0.9.53")]
 [BepInDependency("meow.ModelReplacementAPI", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("BetterEmotes", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("com.weliveinasociety.CustomEmotesAPI", BepInDependency.DependencyFlags.SoftDependency)]
