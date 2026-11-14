@@ -158,6 +158,7 @@ internal sealed class Blackboard
 
     private static readonly HashSet<EnemyAI> enemies = new HashSet<EnemyAI>();
     internal static IEnumerable<EnemyAI> Enemies => enemies;
+    private static readonly HashSet<RedLocustBees> beeSwarms = new HashSet<RedLocustBees>();
     private static readonly HashSet<HoarderBugAI> hoarders = new HashSet<HoarderBugAI>();
     private static readonly HashSet<MouthDogAI> dogs = new HashSet<MouthDogAI>();
     private static readonly HashSet<SandWormAI> worms = new HashSet<SandWormAI>();
@@ -178,6 +179,8 @@ internal sealed class Blackboard
     {
         if (!enemies.Add(enemy))
             return;
+        if (enemy is RedLocustBees bees)
+            beeSwarms.Add(bees);
         if (enemy is HoarderBugAI bug)
             hoarders.Add(bug);
         if (enemy is MouthDogAI dog)
@@ -192,6 +195,8 @@ internal sealed class Blackboard
     internal static void Remove(EnemyAI enemy)
     {
         enemies.Remove(enemy);
+        if (enemy is RedLocustBees bees)
+            beeSwarms.Remove(bees);
         if (enemy is HoarderBugAI bug)
             hoarders.Remove(bug);
         if (enemy is MouthDogAI dog)
@@ -329,6 +334,35 @@ internal sealed class Blackboard
 
     private static bool NeutralHoarder(Component source) => source is HoarderBugAI bug && !HoarderHostile(bug);
 
+    internal static bool GuardedBeeHive(GrabbableObject item)
+    {
+        if (item == null || item.isInFactory || beeSwarms.Count == 0)
+            return false;
+        bool isHive = false;
+        foreach (var swarm in beeSwarms)
+        {
+            if (swarm != null && swarm.hive == item)
+            {
+                isHive = true;
+                break;
+            }
+        }
+        if (!isHive)
+            return false;
+        Vector3 position = item.transform.position;
+        foreach (var swarm in beeSwarms)
+        {
+            if (swarm == null || swarm.isEnemyDead || !swarm.isActiveAndEnabled || !swarm.isOutside)
+                continue;
+            Vector3 offset = swarm.transform.position - position;
+            float height = Mathf.Abs(offset.y);
+            offset.y = 0f;
+            if (BeeHivePolicy.Guarding(true, swarm.daytimeEnemyLeaving, offset.sqrMagnitude, height, swarm.defenseDistance))
+                return true;
+        }
+        return false;
+    }
+
     internal static bool HoarderNearItem(GrabbableObject item)
     {
         if (item == null)
@@ -370,6 +404,7 @@ internal sealed class Blackboard
         this.sightMask = sightMask;
         hazards = new EnvironmentalHazards(sightMask);
         enemies.RemoveWhere(enemy => enemy == null);
+        beeSwarms.RemoveWhere(bees => bees == null);
         hoarders.RemoveWhere(bug => bug == null);
         dogs.RemoveWhere(dog => dog == null);
         worms.RemoveWhere(worm => worm == null);
@@ -592,6 +627,15 @@ internal sealed class Blackboard
         return null;
     }
 
+    internal static FlowerSnakeEnemy? MainTulip(PlayerControllerB player)
+    {
+        foreach (var enemy in enemies)
+            if (enemy is FlowerSnakeEnemy snake && !snake.isEnemyDead && snake.isActiveAndEnabled &&
+                snake.clingingToPlayer == player && snake.clingPosition == 4)
+                return snake;
+        return null;
+    }
+
     internal FlowerSnakeEnemy? NearbyTulipSnake(Vector3 position, bool inside)
     {
         FlowerSnakeEnemy? closest = null;
@@ -789,7 +833,7 @@ internal sealed class Blackboard
                 continue;
             }
             if (!(item is RagdollGrabbableObject body && body.ragdoll != null && BotSettings.RecoverBodies ||
-                item.itemProperties.isScrap && item.scrapValue > 0 && BotSettings.CollectItems))
+                item.itemProperties.isScrap && item.scrapValue > 0 && BotSettings.CollectItems) || GuardedBeeHive(item))
                 continue;
             if (!item.isInFactory || item is RagdollGrabbableObject)
             {

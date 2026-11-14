@@ -679,7 +679,7 @@ internal sealed class BotBody : IDisposable
 
     internal bool Grab(GrabbableObject item)
     {
-        if (pendingDrop != null || Blackboard.HoarderNearItem(item) || !CanCarry(item) || item.isHeld || item.heldByPlayerOnServer || item.isHeldByEnemy)
+        if (pendingDrop != null || Blackboard.GuardedBeeHive(item) || Blackboard.HoarderNearItem(item) || !CanCarry(item) || item.isHeld || item.heldByPlayerOnServer || item.isHeldByEnemy)
             return false;
 
         GrabRpc(Player, item.NetworkObject);

@@ -8,6 +8,10 @@ static void Check(bool result, string name)
     Console.WriteLine($"PASS {name}");
 }
 
+Check(BeeHivePolicy.Guarding(true, false, 25f, 0f, 8f), "active bees near a hive protect it");
+Check(!BeeHivePolicy.Guarding(true, false, 81f, 0f, 8f), "distant bees do not protect a hive");
+Check(!BeeHivePolicy.Guarding(false, false, 0f, 0f, 8f) && !BeeHivePolicy.Guarding(true, true, 0f, 0f, 8f), "dead or departing bees do not protect a hive");
+Check(!BeeHivePolicy.Guarding(true, false, 0f, 4.1f, 8f), "bees on a different elevation do not protect a hive");
 Check(AreaHazardPolicy.Proximity(5f, 0f, 5f) >= 0.5f && AreaHazardPolicy.Proximity(7f, 0f, 5f) == 0f, "bee hazard has a bounded danger radius");
 Check(AreaHazardPolicy.CanTraverse(0.8f, 1f, true) && !AreaHazardPolicy.CanTraverse(0.8f, 0f, false), "bots can leave a danger area but avoid entering it");
 Check(!RoundStartPolicy.CanAcceptNewRound(false, true, false), "replicas remain closed in orbit");
@@ -24,6 +28,9 @@ using (BotHudScope.Enter())
 }
 Check(!BotHudScope.Active, "normal player HUD resumes after bot item action");
 Check(!NutcrackerPolicy.Moving(false, 1f, 1f, 2f), "nutcracker ignores a stationary bot with a still view");
+Check(TulipFlightPolicy.FallVelocity(-20f, -16f, 0.1f, true, true) > -8f, "tulip flight can lift a grounded bot");
+Check(TulipFlightPolicy.FallVelocity(-7f, -16f, 0.1f, true, false) < -7f, "airborne tulip flight uses counteractive gravity");
+Check(TulipFlightPolicy.FallVelocity(-7f, -16f, 0.1f, false, false) < -10f, "bot falls when tulip flight stops");
 Check(NutcrackerPolicy.Moving(false, 0f, 1f, 20f), "nutcracker detects actual movement");
 Check(NutcrackerPolicy.Moving(false, 1f, 0f, 5f) && !NutcrackerPolicy.Moving(false, 1f, 0f, 15f), "nutcracker detects close camera turns");
 Check(NutcrackerPolicy.Moving(true, 1f, 1f, 20f), "nutcracker detects an emote");
@@ -98,6 +105,7 @@ Check(MovementPolicy.FallDamage(-35f, true) == 0, "safe landing does not inflict
 Check(MovementPolicy.FallDamage(-41f, true) == 50, "hard landing uses game damage threshold");
 Check(MovementPolicy.FallDamage(-50f, true) == 100, "fatal fall uses game damage threshold");
 Check(MovementPolicy.FallDamage(-10f, false) == 100, "unlanded fall cannot leave a bot suspended");
+Check(MovementPolicy.JumpMakesProgress(100f, 64f) && !MovementPolicy.JumpMakesProgress(100f, 100f), "partial jump routes must advance toward the destination");
 Check(MovementPolicy.CanJumpGap(9f, 1f), "short reachable gap can be jumped");
 Check(!MovementPolicy.CanJumpGap(17f, 0f), "gap beyond jump range is rejected");
 Check(!MovementPolicy.CanJumpGap(4f, 2f), "jump to an excessive height is rejected");

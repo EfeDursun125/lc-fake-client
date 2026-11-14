@@ -39,7 +39,12 @@ internal sealed class CrewBot : IDisposable, IBot
     private float jumpStarted;
     private float jumpDuration;
     private float nextJumpSearch;
+    private int jumpSearchFrame = -1;
+    private int jumpSearchesThisFrame;
     private bool bridgeFalling;
+    private bool tulipAirborne;
+    private bool tulipLandingHandled;
+    private float tulipFallVelocity;
     private bool waitingForBridge;
     private float bridgeFallVelocity;
     private float bridgeFallStartHeight;
@@ -127,6 +132,7 @@ internal sealed class CrewBot : IDisposable, IBot
     private EntranceTeleport? openingPortal;
     private float portalReadyAt;
     private Vector3 portalApproach;
+    private float portalEdgeRetryStarted = -1f;
     private int routeRecoveryAttempts;
     private GrabbableObject? lightningRetreat;
     private Shovel? swingWeapon;
@@ -336,7 +342,7 @@ internal sealed class CrewBot : IDisposable, IBot
         return direction.sqrMagnitude < 0.01f || Vector3.Angle(Body.transform.forward, direction) <= 25f || now >= doorFacingDeadline;
     }
     internal bool Sprinting => Body.isSprinting;
-    internal bool Jumping => jumping || bridgeFalling;
+    internal bool Jumping => jumping || bridgeFalling || tulipAirborne;
     internal byte ShipEmote => shipEmote;
     internal Vector3 LookPoint => lookPoint;
     internal bool LookingAtPortal => openingPortal != null;
@@ -444,9 +450,18 @@ internal sealed class CrewBot : IDisposable, IBot
 
     private bool TryBridgePartialPath(Vector3 goal, Vector3 edge, bool inside, float now)
     {
-        if (now < nextJumpSearch || !agent.enabled || !agent.isOnNavMesh)
+        if (!agent.enabled || !agent.isOnNavMesh)
             return false;
-        nextJumpSearch = now + 0.75f;
+        if (jumpSearchFrame != Time.frameCount)
+        {
+            if (now < nextJumpSearch)
+                return false;
+            jumpSearchFrame = Time.frameCount;
+            jumpSearchesThisFrame = 0;
+            nextJumpSearch = now + 0.75f;
+        }
+        if (jumpSearchesThisFrame++ >= 3)
+            return false;
         Vector3 direction = goal - edge;
         direction.y = 0f;
         if (direction.sqrMagnitude < 0.36f)
@@ -457,19 +472,33 @@ internal sealed class CrewBot : IDisposable, IBot
             director.TryJumpLink(agent, edge, goal, inside, now))
             return true;
 
-        for (int angleIndex = 0; angleIndex < 5; angleIndex++)
+        float initialDistance = (edge - goal).sqrMagnitude;
+        for (int angleIndex = 0; angleIndex < 9; angleIndex++)
         {
             float angle = angleIndex == 0 ? 0f : (angleIndex % 2 == 1 ? 1f : -1f) * ((angleIndex + 1) / 2) * 35f;
             Vector3 ray = Quaternion.Euler(0f, angle, 0f) * direction;
             for (int step = 1; step <= 4; step++)
             {
                 Vector3 candidate = edge + ray * step;
-                if (!NavMesh.SamplePosition(candidate, out var landing, 0.75f, agent.areaMask) ||
-                    (landing.position - candidate).sqrMagnitude > 0.56f ||
-                    !NavMesh.Raycast(edge, landing.position, out _, agent.areaMask))
-                    continue;
-                if (director.TryJumpLink(agent, edge, landing.position, inside, now))
-                    return true;
+                for (int heightIndex = 0; heightIndex < 3; heightIndex++)
+                {
+                    float height = heightIndex == 0 ? 0f : heightIndex == 1 ? 0.8f : -0.8f;
+                    Vector3 probe = candidate + Vector3.up * height;
+                    if (!NavMesh.SamplePosition(probe, out var landing, 0.6f, agent.areaMask) ||
+                        (landing.position - probe).sqrMagnitude > 0.36f ||
+                        !NavMesh.Raycast(edge, landing.position, out _, agent.areaMask) ||
+                        !NavMesh.CalculatePath(landing.position, goal, agent.areaMask, spikeDetourPath))
+                        continue;
+                    if (spikeDetourPath.status != NavMeshPathStatus.PathComplete)
+                    {
+                        int count = spikeDetourPath.GetCornersNonAlloc(riskCorners);
+                        if (count == 0 || count == riskCorners.Length ||
+                            !MovementPolicy.JumpMakesProgress(initialDistance, (riskCorners[count - 1] - goal).sqrMagnitude))
+                            continue;
+                    }
+                    if (director.TryJumpLink(agent, edge, landing.position, inside, now))
+                        return true;
+                }
             }
         }
         return false;
@@ -499,6 +528,7 @@ internal sealed class CrewBot : IDisposable, IBot
         laneUsed = false;
         hasPreviousCorner = false;
         selectedPortal = null;
+        portalEdgeRetryStarted = -1f;
         routeRecoveryAttempts = 0;
         recoveryUntil = 0f;
         assignedAt = Time.time;
@@ -662,6 +692,8 @@ internal sealed class CrewBot : IDisposable, IBot
         }
         else
             grabbedBy = null;
+        if (TickTulipFlight())
+            return;
         if (liftPhase == LiftPhase.Board || liftPhase == LiftPhase.Ride || liftPhase == LiftPhase.Exit)
         {
             TickElevator(now);
@@ -852,6 +884,71 @@ internal sealed class CrewBot : IDisposable, IBot
             Plugin.SyncBotEmote(Body, custom);
         }
         body.SetEmote(value);
+    }
+
+    private bool TickTulipFlight()
+    {
+        var snake = Blackboard.MainTulip(Body);
+        bool flying = snake != null && snake.activatedFlight && Body.jetpackControls && !Body.disablingJetpackControls;
+        if (!tulipAirborne && !flying)
+            return false;
+        var controller = Body.thisController;
+        if (controller == null || !controller.enabled)
+            return false;
+        if (!tulipAirborne)
+        {
+            if (liftPhase != LiftPhase.None)
+                AbortElevator();
+            if (agent.enabled)
+                agent.enabled = false;
+            jumping = false;
+            bridgeFalling = false;
+            body.SetJumping(true);
+            tulipFallVelocity = -2f;
+            tulipLandingHandled = false;
+            tulipAirborne = true;
+        }
+
+        if (flying)
+            tulipLandingHandled = false;
+        tulipFallVelocity = TulipFlightPolicy.FallVelocity(tulipFallVelocity, Body.jetpackCounteractiveForce,
+            Time.deltaTime, flying, controller.isGrounded);
+        Vector3 motion = Body.externalForces + Vector3.up * tulipFallVelocity;
+        Body.externalForces = Vector3.zero;
+        CollisionFlags collision = controller.Move(motion * Time.deltaTime);
+        agent.transform.position = Body.transform.position;
+        body.Pose(Body.transform.position, Body.transform.rotation, false, Inside, Aboard);
+        bool landed = (collision & CollisionFlags.Below) != 0;
+        if (!landed || flying)
+            return true;
+
+        if (!tulipLandingHandled)
+        {
+            tulipLandingHandled = true;
+            if (Body.jetpackControls || Body.disablingJetpackControls)
+                Body.DisableJetpackControlsLocally();
+            int damage = MovementPolicy.FallDamage(tulipFallVelocity, true);
+            if (damage > 0)
+                body.ApplyDamage(damage, CauseOfDeath.Gravity, 0, Vector3.down * Mathf.Abs(tulipFallVelocity), true);
+            if (body.Dead)
+                return true;
+        }
+        if (!NavMesh.SamplePosition(Body.transform.position, out var landing, 2f, agent.areaMask) ||
+            Mathf.Abs(landing.position.y - Body.transform.position.y) > 1.5f)
+            return true;
+        agent.transform.position = landing.position;
+        agent.updatePosition = true;
+        agent.enabled = true;
+        if (!agent.isOnNavMesh)
+        {
+            agent.enabled = false;
+            return true;
+        }
+        tulipAirborne = false;
+        body.SetJumping(false);
+        nextRoute = 0f;
+        director.RequestReplan();
+        return false;
     }
 
     private void TickBridgeFall(float now)
@@ -1653,6 +1750,12 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
 
+        if (order.Kind == TaskKind.Scavenge && order.Item != null && Blackboard.GuardedBeeHive(order.Item))
+        {
+            Finish(0f);
+            director.RequestReplan();
+            return;
+        }
         if (order.Inside != Inside)
         {
             CrossPortal(order.Inside, now);
@@ -1662,7 +1765,7 @@ internal sealed class CrewBot : IDisposable, IBot
         var item = order.Item;
         if (order.Kind == TaskKind.Scavenge || order.Kind == TaskKind.EquipWeapon || order.Kind == TaskKind.CollectDelivery)
         {
-            if (item == null || Blackboard.HoarderNearItem(item) || LightningHazard.IsTarget(item) || item.isHeld || item.heldByPlayerOnServer || item.isHeldByEnemy)
+            if (item == null || Blackboard.GuardedBeeHive(item) || Blackboard.HoarderNearItem(item) || LightningHazard.IsTarget(item) || item.isHeld || item.heldByPlayerOnServer || item.isHeldByEnemy)
             {
                 Finish(-0.15f);
                 return;
@@ -2513,16 +2616,26 @@ internal sealed class CrewBot : IDisposable, IBot
         if (offsetFromEntrance.sqrMagnitude > 12.25f || heightDifference > 3f ||
             (Position - portalApproach).sqrMagnitude > 2.25f)
         {
-            if ((Position - portalApproach).sqrMagnitude <= 2.25f &&
-                !TryPortalApproach(entrance, out portalApproach))
+            if ((Position - portalApproach).sqrMagnitude <= 2.25f)
             {
-                RouteFailed();
-                return;
+                if (!TryPortalApproach(entrance, out var refreshedApproach))
+                {
+                    if (portalEdgeRetryStarted < 0f)
+                        portalEdgeRetryStarted = now;
+                    if (now - portalEdgeRetryStarted >= 4f)
+                        RouteFailed();
+                    else
+                        ResetPath();
+                    return;
+                }
+                portalEdgeRetryStarted = -1f;
+                portalApproach = refreshedApproach;
             }
             MoveTo(portalApproach, now, fleeing: retreating || chasingGiant != null);
             return;
         }
 
+        portalEdgeRetryStarted = -1f;
         scanning = false;
         lookPoint = entrance + Vector3.up * 1.2f;
         nextLook = now + 0.5f;
@@ -3722,7 +3835,14 @@ internal sealed class CrewBot : IDisposable, IBot
         if (disposed)
             return;
         disposed = true;
-        if (!Died)
+        if (tulipAirborne && Body != null)
+        {
+            if (Body.thisController != null && Body.jetpackTurnCompass != null)
+                Body.DisableJetpackControlsLocally();
+            Body.externalForces = Vector3.zero;
+            tulipAirborne = false;
+        }
+        if (!Died && Body != null)
             BotAvatars.Remove(Body);
         director.Bridges.Release(this);
         CloseOpeningPortal();

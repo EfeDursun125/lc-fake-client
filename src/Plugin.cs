@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace LethalFakeClient;
 
-[BepInPlugin("dev.lethalfakeclient", "Lethal Fake Client", "0.9.51")]
+[BepInPlugin("dev.lethalfakeclient", "Lethal Fake Client", "0.9.52")]
 [BepInDependency("meow.ModelReplacementAPI", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("BetterEmotes", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("com.weliveinasociety.CustomEmotesAPI", BepInDependency.DependencyFlags.SoftDependency)]
@@ -180,7 +180,11 @@ internal static class GameHooks
 
     [HarmonyPatch(typeof(EnemyAI), nameof(EnemyAI.OnDestroy))]
     [HarmonyPrefix]
-    private static void EnemyDestroyed(EnemyAI __instance) => Blackboard.Remove(__instance);
+    private static void EnemyDestroyed(EnemyAI __instance)
+    {
+        ThumperBotCollision.Forget(__instance);
+        Blackboard.Remove(__instance);
+    }
 
     [HarmonyPatch(typeof(GrabbableObject), "Start")]
     [HarmonyPostfix]

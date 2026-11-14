@@ -309,7 +309,11 @@ internal sealed class Director
         if (!NavMesh.SamplePosition(start - direction * 0.35f, out var takeoff, 0.6f, agent.areaMask) ||
             !NavMesh.SamplePosition(end + direction * 0.35f, out var landing, 0.6f, agent.areaMask))
             return false;
-        if (!JumpPathSafe(takeoff.position, landing.position, inside))
+        Vector3 actualGap = landing.position - takeoff.position;
+        float actualHeight = actualGap.y;
+        actualGap.y = 0f;
+        if (!MovementPolicy.CanJumpGap(actualGap.sqrMagnitude, actualHeight) ||
+            !JumpPathSafe(takeoff.position, landing.position, inside))
             return false;
 
         var link = NavMesh.AddLink(new NavMeshLinkData
@@ -3360,7 +3364,7 @@ internal sealed class Director
 
     private bool IsAvailable(GrabbableObject? item)
     {
-        return item != null && NoisyLootReady(item, Time.time) && !Blackboard.HoarderNearItem(item) && item.isActiveAndEnabled && item.IsSpawned && item.itemProperties != null && (item is RagdollGrabbableObject body && body.ragdoll != null && BotSettings.RecoverBodies ||
+        return item != null && NoisyLootReady(item, Time.time) && !Blackboard.GuardedBeeHive(item) && !Blackboard.HoarderNearItem(item) && item.isActiveAndEnabled && item.IsSpawned && item.itemProperties != null && (item is RagdollGrabbableObject body && body.ragdoll != null && BotSettings.RecoverBodies ||
             item.itemProperties.isScrap && item.scrapValue > 0 && BotSettings.CollectItems) && item.grabbable && !LightningHazard.IsTarget(item) && !item.isHeld && !item.heldByPlayerOnServer && !item.isHeldByEnemy && !item.isInShipRoom;
     }
 

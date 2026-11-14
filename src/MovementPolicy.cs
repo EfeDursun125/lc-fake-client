@@ -13,6 +13,11 @@ internal static class MovementPolicy
         return horizontalDistanceSquared >= 0.36f && horizontalDistanceSquared <= 16f && height >= -1.25f && height <= 1.25f;
     }
 
+    internal static bool JumpMakesProgress(float initialDistanceSquared, float remainingDistanceSquared)
+    {
+        return remainingDistanceSquared + 1f < initialDistanceSquared;
+    }
+
     internal static int Lane(ulong playerId) => (int)(playerId % 5UL) - 2;
 
     internal static bool MovesSideways(float right, float forward)

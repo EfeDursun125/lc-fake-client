@@ -11,6 +11,7 @@ The host runs the bot Director and mechanics; peers render replicated player bod
 | `*Policy` | Small decision rules shared with the standalone policy checks. |
 | `BotAvatars`, `ModelReplacementCompatibility` | Optional presentation compatibility. |
 | `BotHudScope`, `BotItemHudPatch` | Suppress local item control tips during bot-only inventory operations. |
+| `TulipBotHooks`, `ThumperBotCollision` | Connect vanilla Tulip Snake and Thumper interactions to host-controlled bots. |
 | `EmoteCompatibility` | Optional BetterEmotes and LethalEmotesAPI discovery and playback; no hard dependency. |
 
 Bot inventory actions use a nested thread-local HUD scope so host-owned bot items do not overwrite or clear the local player's control tips; item behavior and synchronization still run normally.
@@ -25,14 +26,19 @@ The session owns the Director and bot instances until round cleanup. Before the 
 | Emote state | Bot body, replicated bot snapshot and reliable custom-emote events | Reset when the bot is no longer idle or is disposed; missing optional mods fall back to a game emote. |
 | Optional emote metadata | `EmoteCompatibility`, reflected mod types and fields | Initialized after soft dependencies; selection lists are rebuilt on each emote choice. |
 | Mineshaft elevator seats | Director, participating bot | Up to four distinct boarding positions are reserved until each bot exits or aborts; only the owner operates the controls. |
+| Thumper collision cache | Thumper instance | Cached trigger and throttled proximity check; removed when the enemy is destroyed. |
 | Nutcracker movement samples | Bot body, frame | Reset after observation gaps; actual position and camera rotation are sampled once per frame. |
 | Learned outcomes | Learning instance, outcome key | Persisted across rounds; maximum 2,048 entries. |
 
+Tulip Snake uses its game conductor for bot attachment, flap and release timing; while airborne, the host bot temporarily yields NavMesh movement to CharacterController flight and fall physics before returning to navigation. Thumpers near a bot target invoke the game's normal collision attack when their colliders are close and unobstructed.
+
 Bots sharing a mineshaft trip board assigned positions and the controlling bot waits briefly for eligible nearby crew. Nutcracker bot detection uses observed displacement, close-range camera turns and emotes rather than a potentially stale walking animation flag.
+
+Partial NavMesh paths may be bridged by bounded jump searches around multiple candidate edges and elevations; partial routes beyond the landing must make progress, and both sampled endpoints and the airborne arc are checked before a shared jump link is created.
 
 For ordinary travel, bots compare complete NavMesh routes through bounded alternate waypoints by length and shared risk, including observed enemies, environmental hazards, death locations, and spike crossings. They validate both legs against existing hazards and keep immediate escape behavior separate; the NavMesh polygons themselves are not modified.
 
-Area hazards track living Circuit Bee swarms as moving risk areas and place temporary nearby navigation obstacles; bots already within the area can route toward safety. Bots discard carried flashlights aboard using the existing synchronized inventory drop path.
+Hive selection and pickup check cached Circuit Bee instances and their runtime hive references; a nearby active, non-departing swarm temporarily excludes that hive while unguarded hives remain eligible. Area hazards track living Circuit Bee swarms as moving risk areas and place temporary nearby navigation obstacles; bots already within the area can route toward safety. Bots discard carried flashlights aboard using the existing synchronized inventory drop path.
 
 Only idle bots aboard the ship may perform random emotes. Ship operators and bots with active assignments do not emote. The host chooses the emote; snapshots carry the vanilla fallback while reliable events carry optional mod emote names. Custom animation playback is local on each peer, and absent mods use the fallback. Bot aim interpolates toward the existing targets without changing navigation decisions. During entrance transitions, the look target and replicated pitch are restricted to the horizon or above.
 
