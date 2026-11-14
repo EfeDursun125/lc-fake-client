@@ -22,6 +22,7 @@ internal sealed class CrewBot : IDisposable, IBot
     private readonly NavMeshPath spikeDetourPath = new NavMeshPath();
     private readonly Vector3[] corners = new Vector3[48];
     private readonly Vector3[] spikeCorners = new Vector3[48];
+    private readonly Vector3[] riskCorners = new Vector3[48];
     private readonly Collider[] nearbyInteractions = new Collider[64];
     private readonly Collider shipRoom;
     private readonly float speed;
@@ -1333,6 +1334,11 @@ internal sealed class CrewBot : IDisposable, IBot
         }
         if (Aboard)
             contact = null;
+        if (Aboard && body.FindItem<FlashlightItem>() is FlashlightItem flashlight && body.DropItem(flashlight, true))
+        {
+            director.RequestReplan();
+            return;
+        }
         if (Aboard && ChargeEquipment(now))
             return;
         if (Aboard && Cargo == null && StoreUnusedEquipment(now))
@@ -2845,6 +2851,12 @@ internal sealed class CrewBot : IDisposable, IBot
             liftPhase = LiftPhase.None;
             director.ReleaseElevator(this);
         }
+        if (waypointActive && fleeing)
+        {
+            waypointActive = false;
+            ResetPath();
+            nextRoute = 0f;
+        }
         if (waypointActive)
         {
             if ((goal - waypointFinalGoal).sqrMagnitude < 2.25f && now < waypointDeadline && agent.hasPath &&
@@ -2908,12 +2920,102 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
 
-        if (now < nextRoute || !fleeing && !elevatorStation && TryRouteWaypoint(goal, now) || TryRoute(goal, now, fleeing))
+        if (now < nextRoute || !fleeing && !elevatorStation && TryRiskWeightedRoute(goal, now) ||
+            !fleeing && !elevatorStation && TryRouteWaypoint(goal, now) || TryRoute(goal, now, fleeing))
             return;
         if (director.OpenNearbyDoor(this, goal, now, fleeing))
             nextRoute = now + 0.6f;
         else
             RecoverRoute(goal, now);
+    }
+
+    private bool TryRiskWeightedRoute(Vector3 goal, float now)
+    {
+        if ((Position - goal).sqrMagnitude < 81f || order.Kind == TaskKind.Escort ||
+            !NavMesh.SamplePosition(goal, out var destination, 2f, agent.areaMask) ||
+            !agent.CalculatePath(destination.position, candidatePath) || candidatePath.status != NavMeshPathStatus.PathComplete ||
+            !EvaluateRiskPath(candidatePath, now, out float directCost, out float directRisk, out Vector3 danger, false) ||
+            directRisk < 0.15f)
+            return false;
+
+        Vector3 direction = destination.position - Position;
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 1f)
+            return false;
+        Vector3 side = Vector3.Cross(Vector3.up, direction.normalized);
+        float bestCost = directCost;
+        Vector3 best = default;
+        bool found = false;
+        for (int distance = 6; distance <= 18; distance += 6)
+        {
+            for (int sign = -1; sign <= 1; sign += 2)
+            {
+                Vector3 point = danger + side * (distance * sign);
+                if (!NavMesh.SamplePosition(point, out var hit, 2f, agent.areaMask) ||
+                    Mathf.Abs(hit.position.y - danger.y) > 2f || (hit.position - Position).sqrMagnitude < 4f ||
+                    !agent.CalculatePath(hit.position, candidatePath) || candidatePath.status != NavMeshPathStatus.PathComplete ||
+                    !EvaluateRiskPath(candidatePath, now, out float firstCost, out _, out _, true) ||
+                    !NavMesh.CalculatePath(hit.position, destination.position, agent.areaMask, spikeDetourPath) ||
+                    spikeDetourPath.status != NavMeshPathStatus.PathComplete ||
+                    !EvaluateRiskPath(spikeDetourPath, now, out float secondCost, out _, out _, true) ||
+                    firstCost + secondCost >= bestCost * 0.95f)
+                    continue;
+                bestCost = firstCost + secondCost;
+                best = hit.position;
+                found = true;
+            }
+        }
+        if (!found || !TryRoute(best, now, false))
+            return false;
+        waypointActive = true;
+        agent.autoBraking = false;
+        waypointGoal = best;
+        waypointFinalGoal = goal;
+        waypointDeadline = now + 12f;
+        return true;
+    }
+
+    private bool EvaluateRiskPath(NavMeshPath route, float now, out float cost, out float highestRisk,
+        out Vector3 danger, bool requireSafe)
+    {
+        cost = 0f;
+        highestRisk = 0f;
+        danger = default;
+        int count = route.GetCornersNonAlloc(riskCorners);
+        if (count < 2 || count == riskCorners.Length)
+            return false;
+        for (int index = 1; index < count; index++)
+        {
+            Vector3 start = riskCorners[index - 1];
+            Vector3 segment = riskCorners[index] - start;
+            float length = segment.magnitude;
+            SpikeRoofTrap? spike = Inside ? director.Board.Spikes.Crossing(start, riskCorners[index]) : null;
+            if (spike != null)
+            {
+                if (requireSafe)
+                    return false;
+                highestRisk = Mathf.Max(highestRisk, 1f);
+                danger = spike.laserEye != null ? spike.laserEye.position : spike.transform.position;
+                cost += MovementPolicy.RiskWeightedDistance(2f, 1f);
+            }
+            int samples = Mathf.Max(1, Mathf.CeilToInt(length / 2f));
+            float step = length / samples;
+            for (int sample = 1; sample <= samples; sample++)
+            {
+                Vector3 point = start + segment * (sample / (float)samples);
+                float areaRisk = director.Board.AreaRisk(point, Inside);
+                float risk = Mathf.Max(director.Board.Risk(point, Inside, now, false), areaRisk);
+                if (risk > highestRisk)
+                {
+                    highestRisk = risk;
+                    danger = point;
+                }
+                if (requireSafe && (risk >= 0.55f || areaRisk >= 0.5f))
+                    return false;
+                cost += MovementPolicy.RiskWeightedDistance(step, risk);
+            }
+        }
+        return true;
     }
 
     private bool TryRouteWaypoint(Vector3 goal, float now)

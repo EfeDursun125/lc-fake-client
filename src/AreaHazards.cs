@@ -8,13 +8,16 @@ internal sealed class AreaHazards : System.IDisposable
 {
     private const float CellSize = 4f;
     private const int MaxObstacles = 64;
+    private const float BeeRiskRadius = 5f;
+    private const float BeeObstacleSize = 12f;
     private readonly Dictionary<Vector3Int, List<Vector3>> indoor = new Dictionary<Vector3Int, List<Vector3>>();
     private readonly Dictionary<Vector3Int, List<Vector3>> outdoor = new Dictionary<Vector3Int, List<Vector3>>();
     private readonly Dictionary<Vector3Int, List<Vector3>> cadaver = new Dictionary<Vector3Int, List<Vector3>>();
     private readonly HashSet<Vector3Int> occupiedObstacles = new HashSet<Vector3Int>();
     private readonly HashSet<Vector3Int> checkedObstacleCells = new HashSet<Vector3Int>();
-    private readonly List<Vector3> obstaclePoints = new List<Vector3>();
+    private readonly List<Vector4> obstaclePoints = new List<Vector4>();
     private readonly List<NavMeshObstacle> obstacles = new List<NavMeshObstacle>();
+    private readonly List<RedLocustBees> bees = new List<RedLocustBees>();
     private readonly List<BlobAI> slimes = new List<BlobAI>();
     private readonly List<CadaverBloomAI> blooms = new List<CadaverBloomAI>();
     private MoldSpreadManager? mold;
@@ -23,13 +26,16 @@ internal sealed class AreaHazards : System.IDisposable
 
     internal void Refresh(List<IBot> bots, IEnumerable<EnemyAI> enemies, float now)
     {
+        bees.Clear();
         slimes.Clear();
         blooms.Clear();
         foreach (var enemy in enemies)
         {
             if (enemy == null || enemy.isEnemyDead || !enemy.isActiveAndEnabled)
                 continue;
-            if (enemy is BlobAI slime)
+            if (enemy is RedLocustBees swarm)
+                bees.Add(swarm);
+            else if (enemy is BlobAI slime)
                 slimes.Add(slime);
             else if (enemy is CadaverBloomAI bloom)
                 blooms.Add(bloom);
@@ -48,6 +54,9 @@ internal sealed class AreaHazards : System.IDisposable
         occupiedObstacles.Clear();
         checkedObstacleCells.Clear();
         obstaclePoints.Clear();
+
+        foreach (var swarm in bees)
+            AddObstacle(swarm.transform.position, bots, !swarm.isOutside, BeeObstacleSize);
 
         if (mold != null && mold.isActiveAndEnabled)
         {
@@ -112,7 +121,7 @@ internal sealed class AreaHazards : System.IDisposable
         AddObstacle(point, bots, inside);
     }
 
-    private void AddObstacle(Vector3 point, List<IBot> bots, bool inside)
+    private void AddObstacle(Vector3 point, List<IBot> bots, bool inside, float size = 4f)
     {
         if (obstaclePoints.Count >= MaxObstacles)
             return;
@@ -125,13 +134,15 @@ internal sealed class AreaHazards : System.IDisposable
             if (!bot.Available || bot.Aboard || bot.Inside != inside)
                 continue;
             float distance = (bot.Position - point).sqrMagnitude;
-            if (distance < 16f)
+            float clearance = size * 0.5f + 1f;
+            if (distance < clearance * clearance)
                 return;
-            if (distance <= 324f)
+            float detectionRange = size > 4f ? 30f : 18f;
+            if (distance <= detectionRange * detectionRange)
                 nearby = true;
         }
         if (nearby && occupiedObstacles.Add(cell))
-            obstaclePoints.Add(point);
+            obstaclePoints.Add(new Vector4(point.x, point.y, point.z, size));
     }
 
     private void UpdateObstacles()
@@ -148,7 +159,9 @@ internal sealed class AreaHazards : System.IDisposable
                 obstacles.Add(obstacle);
             }
             var marker = obstacles[index];
-            Vector3 target = obstaclePoints[index] + Vector3.up;
+            Vector4 point = obstaclePoints[index];
+            marker.size = new Vector3(point.w, 3f, point.w);
+            Vector3 target = new Vector3(point.x, point.y + 1f, point.z);
             if ((marker.transform.position - target).sqrMagnitude > 0.04f)
                 marker.transform.position = target;
             marker.enabled = true;
@@ -161,6 +174,7 @@ internal sealed class AreaHazards : System.IDisposable
     {
         float risk = 0f;
         var cells = inside ? indoor : outdoor;
+        risk = Mathf.Max(risk, BeeRisk(point, inside));
         risk = Mathf.Max(risk, RiskFromCells(point, cells));
         risk = Mathf.Max(risk, CadaverRisk(point, inside));
         foreach (var slime in slimes)
@@ -177,11 +191,21 @@ internal sealed class AreaHazards : System.IDisposable
     {
         float risk = 0f;
         var cells = inside ? indoor : outdoor;
+        risk = Mathf.Max(risk, BeeRisk(point, inside));
         risk = Mathf.Max(risk, RiskFromCells(point, cells));
         foreach (var slime in slimes)
             if (slime != null && !slime.isEnemyDead && slime.isActiveAndEnabled && slime.isOutside != inside)
                 risk = Mathf.Max(risk, Proximity(point, slime.centerPoint != null ? slime.centerPoint.position : slime.transform.position,
                     Mathf.Clamp(slime.currentSlimeRange + 2f, 4f, 10f)));
+        return risk;
+    }
+
+    private float BeeRisk(Vector3 point, bool inside)
+    {
+        float risk = 0f;
+        foreach (var swarm in bees)
+            if (swarm != null && !swarm.isEnemyDead && swarm.isActiveAndEnabled && swarm.isOutside != inside)
+                risk = Mathf.Max(risk, Proximity(point, swarm.transform.position, BeeRiskRadius));
         return risk;
     }
 

@@ -717,6 +717,13 @@ internal sealed class Blackboard
             risk = Mathf.Max(risk, failure.Value * Mathf.Clamp01(1f - (now - failure.Time) / 90f));
         if (includeDeaths)
             risk = Mathf.Max(risk, DeathRisk(position, inside, now));
+        risk = Mathf.Max(risk, EnemyRisk(position, inside, now, ignoredEnemy));
+        return risk / BotSettings.RiskTolerance;
+    }
+
+    internal float EnemyRisk(Vector3 position, bool inside, float now, EnemyAI? ignoredEnemy = null)
+    {
+        float risk = 0f;
         foreach (var contact in contacts.Values)
         {
             if (!contact.Sample.Alive || contact.Sample.Outside == inside || contact.Source == ignoredEnemy)
@@ -730,7 +737,7 @@ internal sealed class Blackboard
             float confidence = Mathf.Clamp01(1f - (now - contact.Seen) / 80f);
             risk = Mathf.Max(risk, contact.Severity * proximity * confidence);
         }
-        return risk / BotSettings.RiskTolerance;
+        return risk;
     }
 
     internal void RouteFailed(Vector3 point)

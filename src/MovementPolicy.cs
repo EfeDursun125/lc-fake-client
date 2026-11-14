@@ -33,6 +33,11 @@ internal static class MovementPolicy
             startAlignment >= 0.25f && transitionAlignment >= -0.1f;
     }
 
+    internal static float RiskWeightedDistance(float distance, float risk)
+    {
+        return distance * (1f + 6f * System.Math.Max(0f, risk));
+    }
+
     internal static bool WormThreat(bool targeted, bool emerging, float distanceSquared, float height)
     {
         return targeted || emerging && height <= 18f && distanceSquared <= 144f;

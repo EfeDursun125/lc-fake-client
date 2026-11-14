@@ -8,6 +8,8 @@ static void Check(bool result, string name)
     Console.WriteLine($"PASS {name}");
 }
 
+Check(AreaHazardPolicy.Proximity(5f, 0f, 5f) >= 0.5f && AreaHazardPolicy.Proximity(7f, 0f, 5f) == 0f, "bee hazard has a bounded danger radius");
+Check(AreaHazardPolicy.CanTraverse(0.8f, 1f, true) && !AreaHazardPolicy.CanTraverse(0.8f, 0f, false), "bots can leave a danger area but avoid entering it");
 Check(NutcrackerPolicy.HasTarget(2, 0, 4), "attacking nutcracker has a valid target");
 Check(!HoarderPolicy.IsHostile(0, false) && !HoarderPolicy.IsHostile(1, false), "passive hoarding bug is not a threat");
 Check(MeleePolicy.ShouldSwingMasked(2f, 10f), "masked inside immediate melee range");
@@ -58,6 +60,8 @@ Check(DirectorClock.ExtractionHour(4, 1) == 15f, "death advances return by one h
 Check(DirectorClock.ExtractionHour(4, 1, 22f, false) == 16f, "early return disabled");
 Check(DirectorClock.ExtractionHour(4, 2, 20f) == 12f, "custom return and deaths");
 Check(DirectorClock.ExtractionHour(4, 4, 7f) == 0f, "return cannot precede day start");
+Check(MovementPolicy.RiskWeightedDistance(15f, 0f) < MovementPolicy.RiskWeightedDistance(10f, 0.2f), "safer longer route can cost less than a dangerous shortcut");
+Check(MovementPolicy.RiskWeightedDistance(15f, 0f) > MovementPolicy.RiskWeightedDistance(10f, 0f), "safe routes still prefer shorter paths");
 Check(MovementPolicy.WormThreat(true, false, 10000f, 100f), "targeted worm noticed without sight");
 Check(MovementPolicy.WormThreat(false, true, 144f, 18f), "worm eruption boundary");
 Check(!MovementPolicy.WormThreat(false, true, 145f, 0f), "outside worm eruption area");

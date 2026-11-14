@@ -22,6 +22,10 @@ The session owns the Director and bot instances until round cleanup. Each bot ow
 | Optional emote metadata | `EmoteCompatibility`, reflected mod types and fields | Initialized after soft dependencies; selection lists are rebuilt on each emote choice. |
 | Learned outcomes | Learning instance, outcome key | Persisted across rounds; maximum 2,048 entries. |
 
+For ordinary travel, bots compare complete NavMesh routes through bounded alternate waypoints by length and shared risk, including observed enemies, environmental hazards, death locations, and spike crossings. They validate both legs against existing hazards and keep immediate escape behavior separate; the NavMesh polygons themselves are not modified.
+
+Area hazards track living Circuit Bee swarms as moving risk areas and place temporary nearby navigation obstacles; bots already within the area can route toward safety. Bots discard carried flashlights aboard using the existing synchronized inventory drop path.
+
 Only idle bots aboard the ship may perform random emotes. Ship operators and bots with active assignments do not emote. The host chooses the emote; snapshots carry the vanilla fallback while reliable events carry optional mod emote names. Custom animation playback is local on each peer, and absent mods use the fallback. Bot aim interpolates toward the existing targets without changing navigation decisions.
 
 ## Helper index

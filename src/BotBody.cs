@@ -565,12 +565,12 @@ internal sealed class BotBody : IDisposable
         return null;
     }
 
-    internal bool DropItem(GrabbableObject item)
+    internal bool DropItem(GrabbableObject item, bool aboard = false)
     {
         if (pendingDrop != null || item == null || !item.IsSpawned ||
             Player.currentlyHeldObjectServer != item && Player.twoHanded || !EquipItem(item))
             return false;
-        return Drop(false);
+        return Drop(aboard);
     }
 
     internal GunAmmo? FindAmmo(int ammoType)

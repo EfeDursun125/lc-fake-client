@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/AreaHazardPolicy.cs" Link="AreaHazardPolicy.cs" />
     <Compile Include="../../src/DirectorClock.cs" Link="DirectorClock.cs" />
     <Compile Include="../../src/DeliveryPolicy.cs" Link="DeliveryPolicy.cs" />
     <Compile Include="../../src/BotRolePolicy.cs" Link="BotRolePolicy.cs" />
