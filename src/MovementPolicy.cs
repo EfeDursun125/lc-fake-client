@@ -18,6 +18,11 @@ internal static class MovementPolicy
         return remainingDistanceSquared + 1f < initialDistanceSquared;
     }
 
+    internal static bool DoorIntersectsJump(float distanceSquared, float heightDifference)
+    {
+        return distanceSquared <= 2.25f && System.Math.Abs(heightDifference) <= 2.5f;
+    }
+
     internal static int Lane(ulong playerId) => (int)(playerId % 5UL) - 2;
 
     internal static bool MovesSideways(float right, float forward)

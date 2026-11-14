@@ -163,6 +163,9 @@ Check(MovementPolicy.CanJumpGap(9f, 1f), "short reachable gap can be jumped");
 Check(!MovementPolicy.CanJumpGap(17f, 0f), "gap beyond jump range is rejected");
 Check(!MovementPolicy.CanJumpGap(4f, 2f), "jump to an excessive height is rejected");
 Check(!MovementPolicy.CanJumpGap(4f, -2f), "unsafe jump down is rejected");
+Check(MovementPolicy.DoorIntersectsJump(1f, 0f), "jump route beside a door is blocked");
+Check(!MovementPolicy.DoorIntersectsJump(2.26f, 0f) && !MovementPolicy.DoorIntersectsJump(1f, 2.6f),
+    "distant doors and doors on other floors do not block jumps");
 Check(MovementPolicy.MovesSideways(0.9f, 0.3f), "diagonal strafe uses sideways animation");
 Check(!MovementPolicy.MovesSideways(0.3f, 0.9f), "forward movement uses forward animation");
 Check(MovementPolicy.AnimationDirection(-0.9f, 0.3f, true) == -1f, "left strafe uses reverse animation");

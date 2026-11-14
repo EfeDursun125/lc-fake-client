@@ -1005,6 +1005,7 @@ internal sealed class CrewBot : IDisposable, IBot
             }
             if (!director.JumpPathSafe(link.startPos, link.endPos, Inside))
             {
+                director.OpenNearbyDoor(this, link.endPos, now);
                 agent.Warp(link.startPos);
                 ResetPath();
                 nextRoute = now + 1f;
@@ -3183,7 +3184,7 @@ internal sealed class CrewBot : IDisposable, IBot
 
     private bool TryRouteWaypoint(Vector3 goal, float now)
     {
-        if ((Position - goal).sqrMagnitude < 81f || order.Kind == TaskKind.Escort || order.Kind == TaskKind.Evade ||
+        if ((Position - goal).sqrMagnitude < 9f || order.Kind == TaskKind.Escort || order.Kind == TaskKind.Evade ||
             !NavMesh.SamplePosition(goal, out var destination, 2f, agent.areaMask) ||
             !agent.CalculatePath(destination.position, candidatePath) || candidatePath.status != NavMeshPathStatus.PathComplete)
             return false;
@@ -3205,11 +3206,11 @@ internal sealed class CrewBot : IDisposable, IBot
             if (incoming.sqrMagnitude >= 1f && incoming.sqrMagnitude <= 100f && outgoing.sqrMagnitude >= 1f &&
                 Vector3.Dot(incoming.normalized, outgoing.normalized) < 0.85f &&
                 (!hasPreviousCorner || (corner - previousCorner).sqrMagnitude > 4f) &&
-                NavMesh.FindClosestEdge(corner, out var edge, agent.areaMask) && edge.distance < 0.8f)
+                NavMesh.FindClosestEdge(corner, out var edge, agent.areaMask) && edge.distance < agent.radius + 0.6f)
             {
                 previousCorner = corner;
                 hasPreviousCorner = true;
-                Vector3 rounded = corner + edge.normal * 0.75f + outgoing.normalized * 0.8f;
+                Vector3 rounded = corner + edge.normal * (agent.radius + 0.6f) + outgoing.normalized * 0.8f;
                 if (StartWaypoint(rounded, goal, destination.position, firstDirection, directLength, now))
                     return true;
             }

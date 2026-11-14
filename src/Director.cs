@@ -341,7 +341,7 @@ internal sealed class Director
 
     internal bool JumpPathSafe(Vector3 start, Vector3 end, bool inside)
     {
-        if (inside && Board.Spikes.Crossing(start, end, true) != null)
+        if (inside && (JumpCrossesDoor(start, end) || Board.Spikes.Crossing(start, end, true) != null))
             return false;
         Vector3 previous = start + Vector3.up * 0.65f;
         for (int index = 0; index <= 8; index++)
@@ -364,6 +364,28 @@ internal sealed class Director
             previous = next;
         }
         return true;
+    }
+
+    private bool JumpCrossesDoor(Vector3 start, Vector3 end)
+    {
+        Vector3 segment = end - start;
+        segment.y = 0f;
+        float lengthSquared = segment.sqrMagnitude;
+        if (lengthSquared < 0.01f)
+            return false;
+        foreach (var door in doors.Keys)
+        {
+            if (door == null || !door.gameObject.activeInHierarchy)
+                continue;
+            Vector3 offset = door.transform.position - start;
+            float height = offset.y;
+            offset.y = 0f;
+            float fraction = Mathf.Clamp01(Vector3.Dot(offset, segment) / lengthSquared);
+            if (MovementPolicy.DoorIntersectsJump((offset - segment * fraction).sqrMagnitude,
+                height - (end.y - start.y) * fraction))
+                return true;
+        }
+        return false;
     }
 
     internal bool IsJumpLink(Vector3 start, Vector3 end)

@@ -38,7 +38,7 @@ Tulip Snake uses its game conductor for bot attachment, flap and release timing;
 
 Bots sharing a mineshaft trip board assigned positions and the controlling bot waits briefly for eligible nearby crew. Nutcracker bot detection uses observed displacement, close-range camera turns and emotes rather than a potentially stale walking animation flag.
 
-Partial NavMesh paths may be bridged by bounded jump searches around multiple candidate edges and elevations; partial routes beyond the landing must make progress, and both sampled endpoints and the airborne arc are checked before a shared jump link is created.
+Partial NavMesh paths may be bridged by bounded jump searches around multiple candidate edges and elevations; partial routes beyond the landing must make progress, and both sampled endpoints and the airborne arc are checked before a shared jump link is created. Indoor links cannot cross cached door locations, and existing links are checked again before traversal. Corner waypoints maintain clearance based on the agent radius when a safe route exists.
 
 For ordinary travel, bots compare complete NavMesh routes through bounded alternate waypoints by length and shared risk, including observed enemies, environmental hazards, death locations, and spike crossings. They validate both legs against existing hazards and keep immediate escape behavior separate. Existing door carving is temporarily adjusted, and broken bridges and quicksand retain shared carving.
 
