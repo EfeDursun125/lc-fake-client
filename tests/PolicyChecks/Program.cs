@@ -14,6 +14,15 @@ Check(!RoundStartPolicy.CanAcceptNewRound(false, true, false), "replicas remain 
 Check(!RoundStartPolicy.CanAcceptNewRound(true, false, true), "replicas remain closed during departure");
 Check(!RoundStartPolicy.CanAcceptNewRound(false, false, false), "replicas remain closed while landing");
 Check(RoundStartPolicy.CanAcceptNewRound(true, false, false), "replicas reopen after a new landing");
+Check(!BotHudScope.Active, "bot HUD suppression starts inactive");
+using (BotHudScope.Enter())
+{
+    Check(BotHudScope.Active, "bot item action suppresses local HUD changes");
+    using (BotHudScope.Enter())
+        Check(BotHudScope.Active, "nested bot item actions stay suppressed");
+    Check(BotHudScope.Active, "outer bot item action remains suppressed");
+}
+Check(!BotHudScope.Active, "normal player HUD resumes after bot item action");
 Check(NutcrackerPolicy.HasTarget(2, 0, 4), "attacking nutcracker has a valid target");
 Check(!HoarderPolicy.IsHostile(0, false) && !HoarderPolicy.IsHostile(1, false), "passive hoarding bug is not a threat");
 Check(MeleePolicy.ShouldSwingMasked(2f, 10f), "masked inside immediate melee range");

@@ -10,7 +10,10 @@ The host runs the bot Director and mechanics; peers render replicated player bod
 | `Learning` | Bounded, persistent outcome estimates. |
 | `*Policy` | Small decision rules shared with the standalone policy checks. |
 | `BotAvatars`, `ModelReplacementCompatibility` | Optional presentation compatibility. |
+| `BotHudScope`, `BotItemHudPatch` | Suppress local item control tips during bot-only inventory operations. |
 | `EmoteCompatibility` | Optional BetterEmotes and LethalEmotesAPI discovery and playback; no hard dependency. |
+
+Bot inventory actions use a nested thread-local HUD scope so host-owned bot items do not overwrite or clear the local player's control tips; item behavior and synchronization still run normally.
 
 The session owns the Director and bot instances until round cleanup. Before the game revives players, dead bot slots are retired and released on each peer so the game does not revive them as human players; clients reject late bot state and death messages until the next landing. Each bot owns its navigation agent and body wrapper. Unity state and the caches below are accessed on the game thread.
 

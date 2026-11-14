@@ -254,6 +254,7 @@ internal static class GameHooks
         if ((uint)slot >= (uint)__instance.ItemSlots.Length && slot != 50)
             return false;
 
+        using var hudScope = BotHudScope.Enter();
         var previous = __instance.currentlyHeldObjectServer;
         if (previous != null && previous != fillSlotWithItem)
             previous.PocketItem();

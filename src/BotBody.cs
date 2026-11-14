@@ -354,7 +354,7 @@ internal sealed class BotBody : IDisposable
             if (Player.currentlyHeldObjectServer is Shovel heldWeapon)
             {
                 terminalPocketedItem = heldWeapon;
-                heldWeapon.PocketItem();
+                BotItemActions.Pocket(heldWeapon);
             }
             terminalPoseTrigger = trigger;
             Player.inTerminalMenu = true;
@@ -395,7 +395,7 @@ internal sealed class BotBody : IDisposable
     private void RestoreTerminalItem()
     {
         if (terminalPocketedItem != null && terminalPocketedItem == Player.currentlyHeldObjectServer && terminalPocketedItem.isHeld)
-            terminalPocketedItem.EquipItem();
+            BotItemActions.Equip(terminalPocketedItem);
         terminalPocketedItem = null;
     }
 
@@ -665,7 +665,7 @@ internal sealed class BotBody : IDisposable
             (door.lockPickerPosition2.position - Player.transform.position).sqrMagnitude;
         Vector3 offset = first ? door.lockPickerPosition.localPosition : door.lockPickerPosition2.localPosition;
         Player.PlaceGrabbableObject(door.transform, offset, true, picker);
-        picker.DiscardItem();
+        BotItemActions.Discard(picker);
         PlaceRpc(Player, picker.NetworkObject, door.NetworkObject, offset, true);
         picker.PlaceLockPickerServerRpc(door.NetworkObject, first);
         picker.PlaceOnDoor(door, first);
@@ -689,7 +689,7 @@ internal sealed class BotBody : IDisposable
         Vector3 localFloor = parent.InverseTransformPoint(floor);
         Player.SetObjectAsNoLongerHeld(aboard, aboard, localFloor, item);
         item.isInFactory = Player.isInsideFactory;
-        item.DiscardItem();
+        BotItemActions.Discard(item);
         pendingDrop = item;
         dropDeadline = Time.time + 1.5f;
         restoreWeapon = true;
@@ -844,7 +844,7 @@ internal sealed class BotBody : IDisposable
         Vector3 localFloor = parent.InverseTransformPoint(floor);
         Player.SetObjectAsNoLongerHeld(aboard, aboard, localFloor, item);
         item.isInFactory = Player.isInsideFactory;
-        item.DiscardItem();
+        BotItemActions.Discard(item);
         Plugin.SyncBotDroppedItem(Player, item, localFloor, aboard, Player.isInsideFactory);
     }
 
