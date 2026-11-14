@@ -900,6 +900,10 @@ internal sealed class BotBody : IDisposable
 
     public void Dispose()
     {
+        active.Remove(Player);
+        if (Player == null || !Player.IsOwnedByServer ||
+            Player.playersManager != null && Player.playersManager.ClientPlayerList.ContainsValue((int)Player.playerClientId))
+            return;
         SetCustomEmote(string.Empty);
         SetEmote(0);
         Player.emoteLayerWeight = 0f;
@@ -908,11 +912,6 @@ internal sealed class BotBody : IDisposable
         SetJumping(false);
         if (terminalUsing)
             SetTerminalPose(false);
-        active.Remove(Player);
-        if (Player == null || !Player.IsOwnedByServer ||
-            Player.playersManager != null && Player.playersManager.ClientPlayerList.ContainsValue((int)Player.playerClientId))
-            return;
-
         if (Dead || Player.isPlayerDead)
         {
             Player.isPlayerControlled = false;

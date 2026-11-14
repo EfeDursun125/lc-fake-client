@@ -18,7 +18,7 @@ internal sealed class EnvironmentalHazards : IDisposable
     private static readonly AccessTools.FieldRef<TerminalAccessibleObject, bool> TerminalInCooldown =
         AccessTools.FieldRefAccess<TerminalAccessibleObject, bool>("inCooldown");
     private readonly List<Component> candidates = new List<Component>();
-    private readonly Dictionary<Component, NavMeshObstacle> known = new Dictionary<Component, NavMeshObstacle>();
+    private readonly Dictionary<Component, NavMeshObstacle?> known = new Dictionary<Component, NavMeshObstacle?>();
     private readonly List<Component> expired = new List<Component>();
     private readonly Queue<string> warnings = new Queue<string>();
     private readonly int sightMask;
@@ -58,19 +58,23 @@ internal sealed class EnvironmentalHazards : IDisposable
                 if (!brokenBridge && ((target - eye).sqrMagnitude > 400f ||
                     Physics.Linecast(eye, target, sightMask, QueryTriggerInteraction.Ignore)))
                     continue;
-                var marker = new GameObject("LethalFakeClient.HazardObstacle");
-                marker.transform.position = source.transform.position;
-                var obstacle = marker.AddComponent<NavMeshObstacle>();
-                obstacle.shape = NavMeshObstacleShape.Box;
-                if ((source is QuicksandTrigger || brokenBridge) && source.TryGetComponent<Collider>(out var boundsCollider))
+                NavMeshObstacle? obstacle = null;
+                if (source is QuicksandTrigger || brokenBridge)
                 {
-                    Bounds bounds = boundsCollider.bounds;
-                    marker.transform.position = bounds.center;
-                    obstacle.size = new Vector3(bounds.size.x + 1f, Mathf.Max(2f, bounds.size.y), bounds.size.z + 1f);
+                    var marker = new GameObject("LethalFakeClient.HazardObstacle");
+                    marker.transform.position = source.transform.position;
+                    obstacle = marker.AddComponent<NavMeshObstacle>();
+                    obstacle.shape = NavMeshObstacleShape.Box;
+                    if (source.TryGetComponent<Collider>(out var boundsCollider))
+                    {
+                        Bounds bounds = boundsCollider.bounds;
+                        marker.transform.position = bounds.center;
+                        obstacle.size = new Vector3(bounds.size.x + 1f, Mathf.Max(2f, bounds.size.y), bounds.size.z + 1f);
+                    }
+                    else
+                        obstacle.size = new Vector3(4f, 4f, 4f);
+                    obstacle.carving = true;
                 }
-                else
-                    obstacle.size = source is Landmine ? new Vector3(3f, 3f, 3f) : new Vector3(4f, 4f, 4f);
-                obstacle.carving = true;
                 known.Add(source, obstacle);
                 if ((source is Landmine || source is Turret) && warnings.Count < 32)
                 {
@@ -86,9 +90,9 @@ internal sealed class EnvironmentalHazards : IDisposable
         expired.Clear();
         foreach (var pair in known)
         {
-            if (pair.Key == null || pair.Value == null)
+            if (pair.Key == null)
                 expired.Add(pair.Key!);
-            else
+            else if (pair.Value != null)
                 pair.Value.enabled = Active(pair.Key);
         }
         foreach (var source in expired)

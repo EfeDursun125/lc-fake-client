@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Reflection.Emit;
 using GameNetcodeStuff;
@@ -58,6 +59,9 @@ internal static class BotCollisionConditions
 [HarmonyPatch]
 internal static class BotEnemyCollisionContext
 {
+    private static readonly ConcurrentQueue<Assembly> PendingAssemblies = new ConcurrentQueue<Assembly>();
+    private static readonly HashSet<Assembly> ScannedAssemblies = new HashSet<Assembly>();
+    private static Harmony? moddedHarmony;
     private static readonly FieldInfo LocalPlayerField = AccessTools.Field(typeof(GameNetworkManager), nameof(GameNetworkManager.localPlayerController));
     private static readonly MethodInfo ResolveLocalPlayer = AccessTools.Method(typeof(EnemyBotContext), nameof(EnemyBotContext.LocalPlayer));
 
@@ -100,12 +104,31 @@ internal static class BotEnemyCollisionContext
 
     internal static void PatchModded(Harmony harmony)
     {
+        if (moddedHarmony != null)
+            return;
+        moddedHarmony = harmony;
+        AppDomain.CurrentDomain.AssemblyLoad += AssemblyLoaded;
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            PendingAssemblies.Enqueue(assembly);
+        PatchPending();
+    }
+
+    private static void AssemblyLoaded(object sender, AssemblyLoadEventArgs args)
+    {
+        PendingAssemblies.Enqueue(args.LoadedAssembly);
+    }
+
+    internal static void PatchPending()
+    {
+        var harmony = moddedHarmony;
+        if (harmony == null || PendingAssemblies.IsEmpty)
+            return;
         var prefix = new HarmonyMethod(AccessTools.Method(typeof(BotEnemyCollisionContext), nameof(Prefix)));
         var finalizer = new HarmonyMethod(AccessTools.Method(typeof(BotEnemyCollisionContext), nameof(Finalizer)));
         var transpiler = new HarmonyMethod(AccessTools.Method(typeof(BotEnemyCollisionContext), nameof(Transpiler)));
-        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        while (PendingAssemblies.TryDequeue(out var assembly))
         {
-            if (assembly.IsDynamic || assembly == typeof(EnemyAI).Assembly || assembly == typeof(Plugin).Assembly)
+            if (!ScannedAssemblies.Add(assembly) || assembly.IsDynamic || assembly == typeof(EnemyAI).Assembly || assembly == typeof(Plugin).Assembly)
                 continue;
             foreach (var method in FindCollisionMethods(assembly))
             {
@@ -119,6 +142,16 @@ internal static class BotEnemyCollisionContext
                 }
             }
         }
+    }
+
+    internal static void StopPatching()
+    {
+        AppDomain.CurrentDomain.AssemblyLoad -= AssemblyLoaded;
+        moddedHarmony = null;
+        while (PendingAssemblies.TryDequeue(out _))
+        {
+        }
+        ScannedAssemblies.Clear();
     }
 
     [HarmonyPrefix]

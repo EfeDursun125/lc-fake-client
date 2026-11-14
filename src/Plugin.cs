@@ -59,6 +59,7 @@ public sealed class Plugin : BaseUnityPlugin
             loggedPump = true;
             Log.LogInfo($"Bot update loop started (source={(fromGame ? "game" : "plugin")}).");
         }
+        BotEnemyCollisionContext.PatchPending();
         TickSession();
     }
 
@@ -105,6 +106,7 @@ public sealed class Plugin : BaseUnityPlugin
     internal static void DriverDestroyed()
     {
         driver = null;
+        BotEnemyCollisionContext.StopPatching();
         CloseSession();
     }
 

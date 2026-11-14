@@ -6,6 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/AreaHazardPolicy.cs" Link="AreaHazardPolicy.cs" />
+    <Compile Include="../../src/NetworkGeneration.cs" Link="NetworkGeneration.cs" />
     <Compile Include="../../src/BeeHivePolicy.cs" Link="BeeHivePolicy.cs" />
     <Compile Include="../../src/TulipFlightPolicy.cs" Link="TulipFlightPolicy.cs" />
     <Compile Include="../../src/BotHudScope.cs" Link="BotHudScope.cs" />

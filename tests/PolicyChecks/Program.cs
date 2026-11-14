@@ -8,6 +8,56 @@ static void Check(bool result, string name)
     Console.WriteLine($"PASS {name}");
 }
 
+static byte[] GenerationPacket(ulong session, uint round, int slot, ulong generation)
+{
+    using var stream = new System.IO.MemoryStream();
+    using var writer = new System.IO.BinaryWriter(stream);
+    writer.Write(session);
+    writer.Write(round);
+    writer.Write(slot);
+    writer.Write(generation);
+    return stream.ToArray();
+}
+
+static bool AcceptPacket(NetworkGeneration state, byte[] packet, bool snapshot)
+{
+    using var stream = new System.IO.MemoryStream(packet);
+    using var reader = new System.IO.BinaryReader(stream);
+    return state.AcceptRound(reader.ReadUInt64(), reader.ReadUInt32(), out _) &&
+        state.AcceptSlot(reader.ReadInt32(), reader.ReadUInt64(), snapshot, out _);
+}
+
+var generations = new NetworkGeneration();
+generations.SetSession(100);
+Check(generations.AcceptRound(100, 1, out _) && generations.AcceptSlot(2, 1, true, out _), "first bot generation accepted");
+Check(generations.AcceptSlot(2, 1, false, out _), "retiring bot events retain their generation");
+generations.Retire(2, 1);
+Check(generations.AcceptSlot(2, 1, false, out _) && !generations.AcceptSlot(2, 1, true, out _),
+    "late drop is accepted after retirement but stale state cannot resurrect bot");
+Check(generations.AcceptSlot(2, 2, true, out _) && !generations.AcceptSlot(2, 1, false, out _) &&
+    !generations.AcceptSlot(2, 1, true, out _), "slot reuse rejects stale events and state");
+generations.Retire(2, 1);
+Check(generations.AcceptSlot(2, 2, true, out _), "old retirement cannot retire replacement bot");
+Check(!generations.AcceptSlot(9, 3, false, out _) && generations.AcceptSlot(9, 3, true, out _),
+    "events require an initialized slot generation");
+generations.CloseRound();
+Check(!generations.AcceptRound(100, 1, out _), "round closure rejects delayed packets even after landing");
+Check(generations.AcceptRound(100, 2, out _) && !generations.AcceptRound(100, 1, out _) &&
+    !generations.AcceptSlot(2, 2, false, out _), "round change rejects previous round messages");
+generations.SetSession(200);
+Check(!generations.AcceptRound(100, 3, out _) && generations.AcceptRound(200, 1, out _), "new session rejects old session messages");
+var packetState = new NetworkGeneration();
+packetState.SetSession(300);
+byte[] oldBot = GenerationPacket(300, 1, 4, 1);
+byte[] replacement = GenerationPacket(300, 1, 4, 2);
+Check(AcceptPacket(packetState, oldBot, true) && AcceptPacket(packetState, replacement, true),
+    "serialized snapshots establish replacement generation");
+foreach (string kind in new[] { "death", "drop", "identity", "emote", "state" })
+    Check(!AcceptPacket(packetState, oldBot, kind == "state"), $"serialized stale {kind} rejected after slot reuse");
+packetState.CloseRound();
+Check(!AcceptPacket(packetState, replacement, true) && AcceptPacket(packetState, GenerationPacket(300, 2, 4, 3), true),
+    "serialized old-round snapshot rejected after round closure");
+
 Check(BeeHivePolicy.Guarding(true, false, 25f, 0f, 8f), "active bees near a hive protect it");
 Check(!BeeHivePolicy.Guarding(true, false, 81f, 0f, 8f), "distant bees do not protect a hive");
 Check(!BeeHivePolicy.Guarding(false, false, 0f, 0f, 8f) && !BeeHivePolicy.Guarding(true, true, 0f, 0f, 8f), "dead or departing bees do not protect a hive");
@@ -40,6 +90,9 @@ Check(!HoarderPolicy.IsHostile(0, false) && !HoarderPolicy.IsHostile(1, false), 
 Check(MeleePolicy.ShouldSwingMasked(2f, 10f), "masked inside immediate melee range");
 Check(ShipEmotePolicy.Emote((byte)(ShipEmotePolicy.Pack(true, 2) | 8)) == 2, "portal look flag preserves emote encoding");
 string longName = string.Concat(System.Linq.Enumerable.Repeat("🎮", 40));
+Check(BotIdentityPolicy.ValidWireLength(125, 125), "maximum fixed string payload is accepted");
+Check(!BotIdentityPolicy.ValidWireLength(-1, 125) && !BotIdentityPolicy.ValidWireLength(126, 126) &&
+    !BotIdentityPolicy.ValidWireLength(8, 7), "invalid or truncated fixed string payload is rejected");
 string truncatedName = BotIdentityPolicy.NetworkName(longName);
 Check(truncatedName == string.Concat(System.Linq.Enumerable.Repeat("🎮", 31)), "long Steam names preserve complete UTF-8 characters");
 Check(ShipEmotePolicy.Emote(ShipEmotePolicy.Pack(false, 1)) == 1, "first emote survives network encoding");

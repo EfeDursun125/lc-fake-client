@@ -463,7 +463,7 @@ internal sealed class Blackboard
             }
         }
 
-        areaHazards.Refresh(bots, enemies, now);
+        areaHazards.Refresh(enemies, now);
 
         ActiveJester = null;
         foreach (var enemy in enemies)
@@ -750,9 +750,9 @@ internal sealed class Blackboard
     internal float StaticEnvironmentalRisk(Vector3 position, bool inside, Turret? ignored = null) => hazards.Risk(position, inside, ignored);
     internal Turret? DangerousTurret(Vector3 position, bool inside, PlayerControllerB bot) => hazards.DangerousTurret(position, inside, bot);
 
-    internal float Risk(Vector3 position, bool inside, float now, bool includeRouteFailures = true, bool includeDogs = true, bool includeAreas = true, EnemyAI? ignoredEnemy = null, bool includeDeaths = true)
+    internal float Risk(Vector3 position, bool inside, float now, bool includeRouteFailures = true, bool includeDogs = true, bool includeAreas = true, EnemyAI? ignoredEnemy = null, bool includeDeaths = true, bool includeStatic = true)
     {
-        float risk = InMechSight(position, inside) ? 1f : hazards.Risk(position, inside);
+        float risk = InMechSight(position, inside) ? 1f : includeStatic ? hazards.Risk(position, inside) : 0f;
         if (includeDogs)
             risk = Mathf.Max(risk, DogProximityRisk(position, inside));
         if (includeAreas)

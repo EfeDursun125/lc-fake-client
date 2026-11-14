@@ -1,22 +1,15 @@
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.AI;
 
 namespace LethalFakeClient;
 
 internal sealed class AreaHazards : System.IDisposable
 {
     private const float CellSize = 4f;
-    private const int MaxObstacles = 64;
     private const float BeeRiskRadius = 5f;
-    private const float BeeObstacleSize = 12f;
     private readonly Dictionary<Vector3Int, List<Vector3>> indoor = new Dictionary<Vector3Int, List<Vector3>>();
     private readonly Dictionary<Vector3Int, List<Vector3>> outdoor = new Dictionary<Vector3Int, List<Vector3>>();
     private readonly Dictionary<Vector3Int, List<Vector3>> cadaver = new Dictionary<Vector3Int, List<Vector3>>();
-    private readonly HashSet<Vector3Int> occupiedObstacles = new HashSet<Vector3Int>();
-    private readonly HashSet<Vector3Int> checkedObstacleCells = new HashSet<Vector3Int>();
-    private readonly List<Vector4> obstaclePoints = new List<Vector4>();
-    private readonly List<NavMeshObstacle> obstacles = new List<NavMeshObstacle>();
     private readonly List<RedLocustBees> bees = new List<RedLocustBees>();
     private readonly List<BlobAI> slimes = new List<BlobAI>();
     private readonly List<CadaverBloomAI> blooms = new List<CadaverBloomAI>();
@@ -24,7 +17,7 @@ internal sealed class AreaHazards : System.IDisposable
     private float nextDiscovery;
     private float nextRefresh;
 
-    internal void Refresh(List<IBot> bots, IEnumerable<EnemyAI> enemies, float now)
+    internal void Refresh(IEnumerable<EnemyAI> enemies, float now)
     {
         bees.Clear();
         slimes.Clear();
@@ -51,22 +44,15 @@ internal sealed class AreaHazards : System.IDisposable
         ClearCells(indoor);
         ClearCells(outdoor);
         ClearCells(cadaver);
-        occupiedObstacles.Clear();
-        checkedObstacleCells.Clear();
-        obstaclePoints.Clear();
-
-        foreach (var swarm in bees)
-            AddObstacle(swarm.transform.position, bots, !swarm.isOutside, BeeObstacleSize);
-
         if (mold != null && mold.isActiveAndEnabled)
         {
             if (mold.grassInstancer != null && mold.grassInstancer.batchedPositions != null && mold.grassInstancer.batchedPositions.Count > 0)
                 foreach (var point in mold.grassInstancer.batchedPositions)
-                    Add(outdoor, point, bots, false);
+                    Add(outdoor, point);
             else if (mold.generatedMold != null)
                 foreach (var plant in mold.generatedMold)
                     if (plant != null && plant.activeInHierarchy)
-                        Add(outdoor, plant.transform.position, bots, false);
+                        Add(outdoor, plant.transform.position);
         }
         foreach (var enemy in enemies)
         {
@@ -79,7 +65,7 @@ internal sealed class AreaHazards : System.IDisposable
                     if (batch != null && batch.batchedPositions != null)
                         foreach (var point in batch.batchedPositions)
                         {
-                            Add(cadaver, point, bots, true);
+                            Add(cadaver, point);
                             hasPlants = true;
                         }
             }
@@ -87,13 +73,8 @@ internal sealed class AreaHazards : System.IDisposable
                 foreach (var tile in growth.GrowthTiles)
                     if (tile != null && !tile.eradicated && tile.plantPositions != null)
                         foreach (var point in tile.plantPositions)
-                            Add(cadaver, point, bots, true);
+                            Add(cadaver, point);
         }
-        foreach (var slime in slimes)
-            AddObstacle(slime.centerPoint != null ? slime.centerPoint.position : slime.transform.position, bots, !slime.isOutside);
-        foreach (var bloom in blooms)
-            AddObstacle(bloom.transform.position, bots, !bloom.isOutside);
-        UpdateObstacles();
     }
 
     private static Vector3Int Cell(Vector3 point) => Vector3Int.FloorToInt(point / CellSize);
@@ -109,7 +90,7 @@ internal sealed class AreaHazards : System.IDisposable
             list.Clear();
     }
 
-    private void Add(Dictionary<Vector3Int, List<Vector3>> cells, Vector3 point, List<IBot> bots, bool inside)
+    private static void Add(Dictionary<Vector3Int, List<Vector3>> cells, Vector3 point)
     {
         var cell = Cell(point);
         if (!cells.TryGetValue(cell, out var points))
@@ -118,56 +99,6 @@ internal sealed class AreaHazards : System.IDisposable
             cells.Add(cell, points);
         }
         points.Add(point);
-        AddObstacle(point, bots, inside);
-    }
-
-    private void AddObstacle(Vector3 point, List<IBot> bots, bool inside, float size = 4f)
-    {
-        if (obstaclePoints.Count >= MaxObstacles)
-            return;
-        var cell = Cell(point);
-        if (!checkedObstacleCells.Add(cell))
-            return;
-        bool nearby = false;
-        foreach (var bot in bots)
-        {
-            if (!bot.Available || bot.Aboard || bot.Inside != inside)
-                continue;
-            float distance = (bot.Position - point).sqrMagnitude;
-            float clearance = size * 0.5f + 1f;
-            if (distance < clearance * clearance)
-                return;
-            float detectionRange = size > 4f ? 30f : 18f;
-            if (distance <= detectionRange * detectionRange)
-                nearby = true;
-        }
-        if (nearby && occupiedObstacles.Add(cell))
-            obstaclePoints.Add(new Vector4(point.x, point.y, point.z, size));
-    }
-
-    private void UpdateObstacles()
-    {
-        for (int index = 0; index < obstaclePoints.Count; index++)
-        {
-            if (index >= obstacles.Count)
-            {
-                var root = new GameObject("LethalFakeClient.AreaHazard");
-                var obstacle = root.AddComponent<NavMeshObstacle>();
-                obstacle.shape = NavMeshObstacleShape.Box;
-                obstacle.size = new Vector3(4f, 3f, 4f);
-                obstacle.carving = true;
-                obstacles.Add(obstacle);
-            }
-            var marker = obstacles[index];
-            Vector4 point = obstaclePoints[index];
-            marker.size = new Vector3(point.w, 3f, point.w);
-            Vector3 target = new Vector3(point.x, point.y + 1f, point.z);
-            if ((marker.transform.position - target).sqrMagnitude > 0.04f)
-                marker.transform.position = target;
-            marker.enabled = true;
-        }
-        for (int index = obstaclePoints.Count; index < obstacles.Count; index++)
-            obstacles[index].enabled = false;
     }
 
     internal float Risk(Vector3 point, bool inside)
@@ -244,9 +175,11 @@ internal sealed class AreaHazards : System.IDisposable
 
     public void Dispose()
     {
-        foreach (var obstacle in obstacles)
-            if (obstacle != null)
-                UnityEngine.Object.Destroy(obstacle.gameObject);
-        obstacles.Clear();
+        indoor.Clear();
+        outdoor.Clear();
+        cadaver.Clear();
+        bees.Clear();
+        slimes.Clear();
+        blooms.Clear();
     }
 }

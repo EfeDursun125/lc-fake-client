@@ -16,9 +16,18 @@ internal sealed class Session : IDisposable
     private const string DropMessage = "LethalFakeClient.Director.v4.Drop";
     private const string EmoteMessage = "LethalFakeClient.Director.v10.Emote";
     private const string IdentityMessage = "LethalFakeClient.Director.v11.Identity";
-    private const byte ProtocolVersion = 11;
+    private const string WelcomeMessage = "LethalFakeClient.Director.v12.Welcome";
+    private const byte ProtocolVersion = 12;
+    private const int HeaderBytes = sizeof(ulong) + sizeof(uint);
+    private const int SlotBytes = sizeof(int) + sizeof(ulong);
     private const int MaxBots = 128;
-    private const int RecordBytes = sizeof(int) + sizeof(float) * 7 + sizeof(byte) * 2 + sizeof(ulong);
+    private const int RecordBytes = SlotBytes + sizeof(float) * 7 + sizeof(byte) * 2 + sizeof(ulong);
+    private ulong localNonce = BitConverter.ToUInt64(Guid.NewGuid().ToByteArray(), 0) | 1UL;
+    private readonly NetworkGeneration incoming = new NetworkGeneration();
+    private readonly Dictionary<int, ulong> slotGenerations = new Dictionary<int, ulong>();
+    private ulong nextBotGeneration;
+    private ulong hostSession;
+    private uint roundGeneration;
     private readonly List<CrewBot> bots = new List<CrewBot>();
     private readonly List<ulong> recipients = new List<ulong>();
     private readonly HashSet<ulong> peers = new HashSet<ulong>();
@@ -36,6 +45,7 @@ internal sealed class Session : IDisposable
     private bool hadBotsThisRound;
     private bool departureStarted;
     private bool replicaRoundClosed;
+    private bool awaitingFreshRound;
     internal bool BotsSurvivedDeparture { get; private set; }
     private float nextReconcile;
     private float nextSpawnWarning;
@@ -52,6 +62,7 @@ internal sealed class Session : IDisposable
     private sealed class Replica
     {
         internal readonly BotBody Body;
+        internal readonly ulong Generation;
         internal Vector3 Point;
         internal Quaternion Rotation;
         internal byte Flags;
@@ -64,9 +75,10 @@ internal sealed class Session : IDisposable
         internal Quaternion ShipLocalRotation;
         internal Vector3 ShipLocalLook;
 
-        internal Replica(BotBody body, Vector3 point, Quaternion rotation, byte flags)
+        internal Replica(BotBody body, Vector3 point, Quaternion rotation, byte flags, ulong generation)
         {
             Body = body;
+            Generation = generation;
             Point = point;
             Rotation = rotation;
             Flags = flags;
@@ -86,6 +98,7 @@ internal sealed class Session : IDisposable
         }
         else
         {
+            network.CustomMessagingManager.RegisterNamedMessageHandler(WelcomeMessage, ReceiveWelcome);
             network.CustomMessagingManager.RegisterNamedMessageHandler(StateMessage, ReceiveState);
             network.CustomMessagingManager.RegisterNamedMessageHandler(DeathMessage, ReceiveDeath);
             network.CustomMessagingManager.RegisterNamedMessageHandler(DropMessage, ReceiveDroppedItem);
@@ -94,24 +107,93 @@ internal sealed class Session : IDisposable
         }
     }
 
+    private void WriteHeader(FastBufferWriter packet)
+    {
+        packet.WriteValueSafe(localNonce);
+        packet.WriteValueSafe(roundGeneration);
+    }
+
+    private void WriteSlot(FastBufferWriter packet, int slot)
+    {
+        packet.WriteValueSafe(slot);
+        packet.WriteValueSafe(slotGenerations[slot]);
+    }
+
+    private bool ReadHeader(ulong sender, FastBufferReader packet, int payloadBytes)
+    {
+        if (replicaRoundClosed || sender != NetworkManager.ServerClientId || hostSession == 0 ||
+            !packet.TryBeginRead(HeaderBytes + payloadBytes))
+            return false;
+        packet.ReadValueSafe(out ulong session);
+        packet.ReadValueSafe(out uint generation);
+        if (!incoming.AcceptRound(session, generation, out bool changed))
+            return false;
+        if (changed)
+        {
+            ClearReplicas();
+            pendingNames.Clear();
+            ReleaseRetired();
+        }
+        return true;
+    }
+
+    private bool ReadSlot(FastBufferReader packet, bool initialize, out int slot, out ulong generation)
+    {
+        packet.ReadValueSafe(out slot);
+        packet.ReadValueSafe(out generation);
+        var round = StartOfRound.Instance;
+        if (round == null || (uint)slot >= (uint)round.allPlayerScripts.Length || round.ClientPlayerList.ContainsValue(slot))
+            return false;
+        var player = round.allPlayerScripts[slot];
+        if (player == null || player == round.localPlayerController || !player.IsOwnedByServer ||
+            !incoming.AcceptSlot(slot, generation, initialize, out bool changed))
+            return false;
+        if (changed)
+            RemoveReplica(slot);
+        return true;
+    }
+
+    private void ReceiveWelcome(ulong sender, FastBufferReader packet)
+    {
+        if (sender != NetworkManager.ServerClientId || !packet.TryBeginRead(sizeof(ulong) * 2))
+            return;
+        packet.ReadValueSafe(out ulong challenge);
+        packet.ReadValueSafe(out ulong session);
+        if (challenge != localNonce || session == 0)
+            return;
+        if (hostSession != session)
+        {
+            ClearReplicas();
+            pendingNames.Clear();
+            ReleaseRetired();
+            hostSession = session;
+            incoming.SetSession(session);
+        }
+        awaitingFreshRound = false;
+    }
+
     private void SendIdentity(CrewBot bot, ulong client)
     {
         string value = BotIdentityPolicy.NetworkName(bot.Body.playerUsername ?? string.Empty);
-        using var packet = new FastBufferWriter(sizeof(int) + 128, Allocator.Temp);
-        packet.WriteValueSafe((int)bot.Body.playerClientId);
+        using var packet = new FastBufferWriter(HeaderBytes + SlotBytes + sizeof(int) + 125, Allocator.Temp);
+        WriteHeader(packet);
+        WriteSlot(packet, (int)bot.Body.playerClientId);
         var name = new FixedString128Bytes(value);
         packet.WriteValueSafe(name);
-        Network.CustomMessagingManager.SendNamedMessage(IdentityMessage, client, packet, NetworkDelivery.ReliableSequenced);
+        Network.CustomMessagingManager.SendNamedMessage(IdentityMessage, client, packet, NetworkDelivery.ReliableFragmentedSequenced);
     }
 
     private void ReceiveIdentity(ulong sender, FastBufferReader packet)
     {
         var round = StartOfRound.Instance;
-        if (replicaRoundClosed || sender != NetworkManager.ServerClientId || round == null || !packet.TryBeginRead(sizeof(int)))
+        if (round == null || !ReadHeader(sender, packet, SlotBytes) || !ReadSlot(packet, false, out int slot, out _))
             return;
-        packet.ReadValueSafe(out int slot);
+        if (!CanReadName(packet))
+            return;
         packet.ReadValueSafe(out FixedString128Bytes name);
-        if ((uint)slot >= (uint)round.allPlayerScripts.Length || round.ClientPlayerList.ContainsValue(slot))
+        if ((uint)slot >= (uint)round.allPlayerScripts.Length || round.ClientPlayerList.ContainsValue(slot) ||
+            round.allPlayerScripts[slot] == null || !round.allPlayerScripts[slot].IsOwnedByServer ||
+            round.allPlayerScripts[slot] == round.localPlayerController || retired.Contains(round.allPlayerScripts[slot]))
             return;
         string value = name.ToString();
         if (string.IsNullOrWhiteSpace(value))
@@ -119,6 +201,16 @@ internal sealed class Session : IDisposable
         pendingNames[slot] = value;
         if (replicas.TryGetValue(slot, out var replica) && replica.Body.Player != null)
             BotBody.SetName(replica.Body.Player, value);
+    }
+
+    private static bool CanReadName(FastBufferReader packet)
+    {
+        if (!packet.TryBeginRead(sizeof(int)))
+            return false;
+        int position = packet.Position;
+        packet.ReadValueSafe(out int length);
+        packet.Seek(position);
+        return BotIdentityPolicy.ValidWireLength(length, packet.Length - position - sizeof(int));
     }
 
     internal void SendBotEmote(PlayerControllerB player, string emote)
@@ -131,23 +223,25 @@ internal sealed class Session : IDisposable
                 recipients.Add(client);
         if (recipients.Count == 0)
             return;
-        using var packet = new FastBufferWriter(sizeof(int) + 128, Allocator.Temp);
-        packet.WriteValueSafe((int)player.playerClientId);
+        using var packet = new FastBufferWriter(HeaderBytes + SlotBytes + sizeof(int) + 125, Allocator.Temp);
+        if (!slotGenerations.ContainsKey((int)player.playerClientId))
+            return;
+        WriteHeader(packet);
+        WriteSlot(packet, (int)player.playerClientId);
         var name = new FixedString128Bytes(emote);
         packet.WriteValueSafe(name);
-        Network.CustomMessagingManager.SendNamedMessage(EmoteMessage, recipients, packet, NetworkDelivery.ReliableSequenced);
+        Network.CustomMessagingManager.SendNamedMessage(EmoteMessage, recipients, packet, NetworkDelivery.ReliableFragmentedSequenced);
     }
 
     private void ReceiveBotEmote(ulong sender, FastBufferReader packet)
     {
         var round = StartOfRound.Instance;
-        if (replicaRoundClosed || sender != NetworkManager.ServerClientId || round == null || !packet.TryBeginRead(sizeof(int)))
+        if (round == null || !ReadHeader(sender, packet, SlotBytes) || !ReadSlot(packet, false, out int slot, out _))
             return;
-        packet.ReadValueSafe(out int slot);
         if ((uint)slot >= (uint)round.allPlayerScripts.Length || round.ClientPlayerList.ContainsValue(slot))
             return;
         var player = round.allPlayerScripts[slot];
-        if (player == null || player.isPlayerDead || retired.Contains(player))
+        if (player == null || !player.IsOwnedByServer || player.isPlayerDead || retired.Contains(player) || !CanReadName(packet))
             return;
         packet.ReadValueSafe(out FixedString128Bytes name);
         string emote = name.ToString();
@@ -169,30 +263,33 @@ internal sealed class Session : IDisposable
                 recipients.Add(client);
         if (recipients.Count == 0)
             return;
-        using var packet = new FastBufferWriter(sizeof(int) + sizeof(ulong) + sizeof(float) * 3 + sizeof(byte), Allocator.Temp);
-        packet.WriteValueSafe((int)player.playerClientId);
+        using var packet = new FastBufferWriter(HeaderBytes + SlotBytes + sizeof(ulong) + sizeof(float) * 3 + sizeof(byte), Allocator.Temp);
+        if (!slotGenerations.ContainsKey((int)player.playerClientId))
+            return;
+        WriteHeader(packet);
+        WriteSlot(packet, (int)player.playerClientId);
         packet.WriteValueSafe(item.NetworkObjectId);
         packet.WriteValueSafe(localFloor);
         packet.WriteValueSafe((byte)((aboard ? 1 : 0) | (inside ? 2 : 0)));
-        Network.CustomMessagingManager.SendNamedMessage(DropMessage, recipients, packet, NetworkDelivery.ReliableSequenced);
+        Network.CustomMessagingManager.SendNamedMessage(DropMessage, recipients, packet, NetworkDelivery.ReliableFragmentedSequenced);
     }
 
     private void ReceiveDroppedItem(ulong sender, FastBufferReader packet)
     {
         var round = StartOfRound.Instance;
-        if (sender != NetworkManager.ServerClientId || round == null ||
-            !packet.TryBeginRead(sizeof(int) + sizeof(ulong) + sizeof(float) * 3 + sizeof(byte)))
+        if (round == null || !ReadHeader(sender, packet, SlotBytes + sizeof(ulong) + sizeof(float) * 3 + sizeof(byte)) ||
+            !ReadSlot(packet, false, out int slot, out _))
             return;
-        packet.ReadValueSafe(out int slot);
         packet.ReadValueSafe(out ulong objectId);
         packet.ReadValueSafe(out Vector3 floor);
         packet.ReadValueSafe(out byte flags);
-        if ((uint)slot >= (uint)round.allPlayerScripts.Length ||
+        if ((uint)slot >= (uint)round.allPlayerScripts.Length || round.ClientPlayerList.ContainsValue(slot) ||
             !Network.SpawnManager.SpawnedObjects.TryGetValue(objectId, out var networkObject) ||
             networkObject == null || !networkObject.TryGetComponent<GrabbableObject>(out var item))
             return;
         var player = round.allPlayerScripts[slot];
-        if (player == null)
+        if (player == null || player == round.localPlayerController || !player.IsOwnedByServer ||
+            item.itemProperties == null || item.playerHeldBy != null && item.playerHeldBy != player)
             return;
         bool aboard = (flags & 1) != 0;
         var heldBeforeDrop = player.currentlyHeldObjectServer;
@@ -215,6 +312,7 @@ internal sealed class Session : IDisposable
         if (!Network.IsHost || roundPrepared)
             return;
         roundPrepared = true;
+        ++roundGeneration;
         departureStarted = false;
         BotsSurvivedDeparture = false;
         needsFill = true;
@@ -223,15 +321,25 @@ internal sealed class Session : IDisposable
 
     private void ReceiveHello(ulong sender, FastBufferReader reader)
     {
-        if (Network.ConnectedClients.ContainsKey(sender) && reader.TryBeginRead(sizeof(byte)))
-        {
-            reader.ReadValueSafe(out byte version);
-            if (version != ProtocolVersion || !peers.Add(sender))
-                return;
-            needsFill = true;
-            foreach (var bot in bots)
-                SendIdentity(bot, sender);
-        }
+        if (!Network.ConnectedClients.ContainsKey(sender) || !reader.TryBeginRead(sizeof(byte) * 2 + sizeof(ulong)))
+            return;
+        reader.ReadValueSafe(out byte version);
+        reader.ReadValueSafe(out ulong challenge);
+        reader.ReadValueSafe(out byte freshRound);
+        if (version != ProtocolVersion || challenge == 0)
+            return;
+        var round = StartOfRound.Instance;
+        if (freshRound != 0 && (!roundPrepared || round == null || !round.shipHasLanded || round.shipIsLeaving))
+            return;
+        peers.Add(sender);
+        needsFill = true;
+        using var welcome = new FastBufferWriter(sizeof(ulong) * 2, Allocator.Temp);
+        welcome.WriteValueSafe(challenge);
+        welcome.WriteValueSafe(localNonce);
+        Network.CustomMessagingManager.SendNamedMessage(WelcomeMessage, sender, welcome, NetworkDelivery.ReliableFragmentedSequenced);
+        SendState();
+        foreach (var bot in bots)
+            SendIdentity(bot, sender);
     }
 
     private void Disconnected(ulong client)
@@ -543,8 +651,9 @@ internal sealed class Session : IDisposable
                 recipients.Add(client);
         if (recipients.Count == 0)
             return;
-        using var packet = new FastBufferWriter(sizeof(int) * 3 + sizeof(float) * 7 + sizeof(byte) + sizeof(ulong), Allocator.Temp);
-        packet.WriteValueSafe((int)player.playerClientId);
+        using var packet = new FastBufferWriter(HeaderBytes + SlotBytes + sizeof(int) * 2 + sizeof(float) * 7 + sizeof(byte) + sizeof(ulong), Allocator.Temp);
+        WriteHeader(packet);
+        WriteSlot(packet, (int)player.playerClientId);
         packet.WriteValueSafe(position);
         packet.WriteValueSafe(yaw);
         packet.WriteValueSafe(body.DeathVelocity);
@@ -552,16 +661,15 @@ internal sealed class Session : IDisposable
         packet.WriteValueSafe(animation);
         packet.WriteValueSafe((byte)((bot.Aboard ? 1 : 0) | (spawnBody ? 2 : 0)));
         packet.WriteValueSafe(bot.AvatarSteamId);
-        Network.CustomMessagingManager.SendNamedMessage(DeathMessage, recipients, packet, NetworkDelivery.ReliableSequenced);
+        Network.CustomMessagingManager.SendNamedMessage(DeathMessage, recipients, packet, NetworkDelivery.ReliableFragmentedSequenced);
     }
 
     private void ReceiveDeath(ulong sender, FastBufferReader packet)
     {
         var round = StartOfRound.Instance;
-        if (replicaRoundClosed || sender != NetworkManager.ServerClientId || round == null ||
-            !packet.TryBeginRead(sizeof(int) * 3 + sizeof(float) * 7 + sizeof(byte) + sizeof(ulong)))
+        if (round == null || !ReadHeader(sender, packet, SlotBytes + sizeof(int) * 2 + sizeof(float) * 7 + sizeof(byte) + sizeof(ulong)) ||
+            !ReadSlot(packet, false, out int slot, out ulong generation))
             return;
-        packet.ReadValueSafe(out int slot);
         packet.ReadValueSafe(out Vector3 position);
         packet.ReadValueSafe(out float yaw);
         packet.ReadValueSafe(out Vector3 velocity);
@@ -575,7 +683,7 @@ internal sealed class Session : IDisposable
         if (spawnBody && ((uint)animation >= (uint)round.playerRagdolls.Count || round.playerRagdolls[animation] == null))
             spawnBody = false;
         var player = round.allPlayerScripts[slot];
-        if (player == null || retired.Contains(player))
+        if (player == null || player == round.localPlayerController || !player.IsOwnedByServer || retired.Contains(player))
             return;
         player.transform.SetPositionAndRotation(position, Quaternion.Euler(0f, yaw, 0f));
         player.isInElevator = (flags & 1) != 0;
@@ -591,6 +699,7 @@ internal sealed class Session : IDisposable
             }
         }
         retired.Add(player);
+        incoming.Retire(slot, generation);
         pendingEmotes.Remove(slot);
         BotAvatars.Assign(player, avatarId);
         if (replicas.TryGetValue(slot, out var replica))
@@ -684,6 +793,7 @@ internal sealed class Session : IDisposable
                 retry = true;
                 continue;
             }
+            slotGenerations[slot] = ++nextBotGeneration;
             bots.Add(bot);
             hadBotsThisRound = true;
             SuitSelector.Assign(player, round);
@@ -728,8 +838,10 @@ internal sealed class Session : IDisposable
         if (Network.IsConnectedClient && now >= nextPacket && now - lastPacket > 2f)
         {
             nextPacket = now + 2f;
-            using var hello = new FastBufferWriter(1, Allocator.Temp);
+            using var hello = new FastBufferWriter(sizeof(byte) * 2 + sizeof(ulong), Allocator.Temp);
             hello.WriteValueSafe(ProtocolVersion);
+            hello.WriteValueSafe(localNonce);
+            hello.WriteValueSafe((byte)(awaitingFreshRound ? 1 : 0));
             Network.CustomMessagingManager.SendNamedMessage(HelloMessage, NetworkManager.ServerClientId, hello);
         }
 
@@ -742,11 +854,17 @@ internal sealed class Session : IDisposable
         }
 
         float blend = 1f - Mathf.Exp(-14f * Time.deltaTime);
-        foreach (var replica in replicas.Values)
+        expired.Clear();
+        foreach (var pair in replicas)
         {
+            var replica = pair.Value;
             var player = replica.Body.Player;
-            if (player == null || !player.IsOwnedByServer || player == StartOfRound.Instance.localPlayerController)
+            if (player == null || !player.IsOwnedByServer || player == StartOfRound.Instance.localPlayerController ||
+                StartOfRound.Instance.ClientPlayerList.ContainsValue(pair.Key))
+            {
+                expired.Add(pair.Key);
                 continue;
+            }
             replica.Body.SetJumping(replica.Jumping);
             replica.Body.SetEmote(replica.Emote);
             var round = StartOfRound.Instance;
@@ -783,6 +901,8 @@ internal sealed class Session : IDisposable
             if ((replica.Flags & 32) == 0)
                 replica.Body.SetLook(replica.LookPoint, preventDownward: replica.PortalLook);
         }
+        foreach (int slot in expired)
+            RemoveReplica(slot);
     }
 
     private void SendState()
@@ -797,11 +917,12 @@ internal sealed class Session : IDisposable
         if (recipients.Count == 0)
             return;
 
-        using var packet = new FastBufferWriter(sizeof(int) + bots.Count * RecordBytes, Allocator.Temp);
+        using var packet = new FastBufferWriter(HeaderBytes + sizeof(int) + bots.Count * RecordBytes, Allocator.Temp);
+        WriteHeader(packet);
         packet.WriteValueSafe(bots.Count);
         foreach (var bot in bots)
         {
-            packet.WriteValueSafe((int)bot.Body.playerClientId);
+            WriteSlot(packet, (int)bot.Body.playerClientId);
             packet.WriteValueSafe(bot.Position);
             packet.WriteValueSafe(bot.Body.transform.eulerAngles.y);
             packet.WriteValueSafe(bot.LookPoint);
@@ -816,7 +937,7 @@ internal sealed class Session : IDisposable
     private void ReceiveState(ulong sender, FastBufferReader packet)
     {
         var round = StartOfRound.Instance;
-        if (replicaRoundClosed || sender != NetworkManager.ServerClientId || round == null || !packet.TryBeginRead(sizeof(int)))
+        if (round == null || !ReadHeader(sender, packet, sizeof(int)))
             return;
 
         packet.ReadValueSafe(out int count);
@@ -828,6 +949,7 @@ internal sealed class Session : IDisposable
         for (; index < count; ++index)
         {
             packet.ReadValueSafe(out int slot);
+            packet.ReadValueSafe(out ulong generation);
             packet.ReadValueSafe(out Vector3 point);
             packet.ReadValueSafe(out float yaw);
             packet.ReadValueSafe(out Vector3 lookPoint);
@@ -842,6 +964,10 @@ internal sealed class Session : IDisposable
                 continue;
             if (!received.Add(slot))
                 continue;
+            if (player.isPlayerDead || retired.Contains(player) || !incoming.AcceptSlot(slot, generation, true, out bool changed))
+                continue;
+            if (changed)
+                RemoveReplica(slot);
             BotAvatars.Assign(player, avatarId);
 
             Quaternion rotation = Quaternion.Euler(0f, yaw, 0f);
@@ -849,7 +975,7 @@ internal sealed class Session : IDisposable
             {
                 if (!player.isPlayerDead && !retired.Contains(player))
                 {
-                    replica = new Replica(new BotBody(player), point, rotation, flags);
+                    replica = new Replica(new BotBody(player), point, rotation, flags, generation);
                     replica.LookPoint = lookPoint;
                     replica.Jumping = (jumpFlag & 1) != 0;
                     replica.Emote = ShipEmotePolicy.Emote(jumpFlag);
@@ -883,13 +1009,19 @@ internal sealed class Session : IDisposable
         }
 
         foreach (int slot in expired)
-        {
-            pendingEmotes.Remove(slot);
-            pendingNames.Remove(slot);
-            BotAvatars.Remove(replicas[slot].Body.Player);
-            replicas[slot].Body.Dispose();
-            replicas.Remove(slot);
-        }
+            RemoveReplica(slot);
+    }
+
+    private void RemoveReplica(int slot)
+    {
+        pendingEmotes.Remove(slot);
+        pendingNames.Remove(slot);
+        if (!replicas.TryGetValue(slot, out var replica))
+            return;
+        incoming.Retire(slot, replica.Generation);
+        BotAvatars.Remove(replica.Body.Player);
+        replica.Body.Dispose();
+        replicas.Remove(slot);
     }
 
     internal void ClearTeam()
@@ -938,6 +1070,12 @@ internal sealed class Session : IDisposable
         if (!Network.IsHost)
         {
             replicaRoundClosed = true;
+            incoming.CloseRound();
+            awaitingFreshRound = true;
+            hostSession = 0;
+            localNonce = BitConverter.ToUInt64(Guid.NewGuid().ToByteArray(), 0) | 1UL;
+            lastPacket = 0f;
+            nextPacket = 0f;
             pendingNames.Clear();
         }
         EndRound();
@@ -978,6 +1116,7 @@ internal sealed class Session : IDisposable
         }
         else
         {
+            Network.CustomMessagingManager?.UnregisterNamedMessageHandler(WelcomeMessage);
             Network.CustomMessagingManager?.UnregisterNamedMessageHandler(StateMessage);
             Network.CustomMessagingManager?.UnregisterNamedMessageHandler(DeathMessage);
             Network.CustomMessagingManager?.UnregisterNamedMessageHandler(DropMessage);

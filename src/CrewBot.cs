@@ -33,6 +33,7 @@ internal sealed class CrewBot : IDisposable, IBot
     private float enteredAt;
     private float nextMechanics;
     private float nextRoute;
+    private float nextHazardPathCheck;
     private bool jumping;
     private Vector3 jumpStart;
     private Vector3 jumpEnd;
@@ -1633,7 +1634,7 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
         if (agent.hasPath && !agent.pathPending && !agent.isOnOffMeshLink &&
-            (director.Board.Risk(agent.steeringTarget, Inside, now, false, false) >= 0.75f ||
+            (HazardAhead(now) || director.Board.Risk(agent.steeringTarget, Inside, now, false, false) >= 0.75f ||
                 Blackboard.DogProximityRisk(agent.steeringTarget, Inside) >= 0.75f &&
                 Blackboard.DogProximityRisk(agent.steeringTarget, Inside) > Blackboard.DogProximityRisk(Position, Inside) + 0.04f ||
                 liftPhase != LiftPhase.Approach && DropAhead()))
@@ -3060,8 +3061,7 @@ internal sealed class CrewBot : IDisposable, IBot
 
     private bool TryRiskWeightedRoute(Vector3 goal, float now)
     {
-        if ((Position - goal).sqrMagnitude < 81f || order.Kind == TaskKind.Escort ||
-            !NavMesh.SamplePosition(goal, out var destination, 2f, agent.areaMask) ||
+        if (!NavMesh.SamplePosition(goal, out var destination, 2f, agent.areaMask) ||
             !agent.CalculatePath(destination.position, candidatePath) || candidatePath.status != NavMeshPathStatus.PathComplete ||
             !EvaluateRiskPath(candidatePath, now, out float directCost, out float directRisk, out Vector3 danger, false) ||
             directRisk < 0.15f)
@@ -3104,6 +3104,39 @@ internal sealed class CrewBot : IDisposable, IBot
         return true;
     }
 
+    private bool HazardAhead(float now)
+    {
+        if (now < nextHazardPathCheck)
+            return false;
+        nextHazardPathCheck = now + 0.4f + (Body.playerClientId % 5) * 0.03f;
+        Vector3 start = Position;
+        Vector3 segment = agent.steeringTarget - start;
+        float length = Mathf.Min(segment.magnitude, 8f);
+        if (length < 0.5f)
+            return false;
+        Vector3 step = segment.normalized * 1.5f;
+        float previousArea = director.Board.AreaRisk(start, Inside);
+        float previousStatic = director.Board.StaticEnvironmentalRisk(start, Inside);
+        bool leavingArea = previousArea >= 0.5f;
+        bool leavingStatic = previousStatic >= 0.55f;
+        for (float distance = 1.5f; distance <= length + 0.75f; distance += 1.5f)
+        {
+            Vector3 point = start + step * (Mathf.Min(distance, length) / 1.5f);
+            float area = director.Board.AreaRisk(point, Inside);
+            float hazard = director.Board.StaticEnvironmentalRisk(point, Inside);
+            if (!AreaHazardPolicy.CanTraverse(area, previousArea, leavingArea) ||
+                !AreaHazardPolicy.CanTraverse(hazard, previousStatic, leavingStatic))
+                return true;
+            if (area < 0.5f)
+                leavingArea = false;
+            if (hazard < 0.5f)
+                leavingStatic = false;
+            previousArea = area;
+            previousStatic = hazard;
+        }
+        return false;
+    }
+
     private bool EvaluateRiskPath(NavMeshPath route, float now, out float cost, out float highestRisk,
         out Vector3 danger, bool requireSafe)
     {
@@ -3133,7 +3166,8 @@ internal sealed class CrewBot : IDisposable, IBot
             {
                 Vector3 point = start + segment * (sample / (float)samples);
                 float areaRisk = director.Board.AreaRisk(point, Inside);
-                float risk = Mathf.Max(director.Board.Risk(point, Inside, now, false), areaRisk);
+                float risk = Mathf.Max(director.Board.Risk(point, Inside, now, false, true, false),
+                    Mathf.Max(areaRisk, areaRisk / BotSettings.RiskTolerance));
                 if (risk > highestRisk)
                 {
                     highestRisk = risk;
@@ -3346,6 +3380,8 @@ internal sealed class CrewBot : IDisposable, IBot
             bool leavingDog = !fleeing && initialDogRisk / BotSettings.RiskTolerance >= 0.55f;
             float previousAreaRisk = director.Board.AreaRisk(Position, Inside);
             bool leavingArea = previousAreaRisk >= 0.5f;
+            float previousStaticRisk = director.Board.StaticEnvironmentalRisk(Position, Inside, ignoredTurret);
+            bool leavingStatic = previousStaticRisk >= 0.55f;
             int corner = 1;
             for (; corner < count; ++corner)
             {
@@ -3362,8 +3398,14 @@ internal sealed class CrewBot : IDisposable, IBot
                     if (areaRisk < 0.5f)
                         leavingArea = false;
                     previousAreaRisk = areaRisk;
-                    float risk = fleeing ? director.Board.StaticEnvironmentalRisk(point, Inside, ignoredTurret) :
-                        director.Board.Risk(point, Inside, now, includeRouteFailures, true, false, ignoredEnemy);
+                    float staticRisk = director.Board.StaticEnvironmentalRisk(point, Inside, ignoredTurret);
+                    if (!AreaHazardPolicy.CanTraverse(staticRisk, previousStaticRisk, leavingStatic))
+                        return false;
+                    if (staticRisk < 0.5f)
+                        leavingStatic = false;
+                    previousStaticRisk = staticRisk;
+                    float risk = fleeing ? leavingStatic ? 0f : staticRisk :
+                        director.Board.Risk(point, Inside, now, includeRouteFailures, true, false, ignoredEnemy, includeStatic: !leavingStatic);
                     if (risk >= 0.55f)
                     {
                         float deathRisk = director.Board.DeathRisk(point, Inside, now);

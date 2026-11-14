@@ -4,6 +4,9 @@ namespace LethalFakeClient;
 
 internal static class BotIdentityPolicy
 {
+    internal static bool ValidWireLength(int length, int available) =>
+        length >= 0 && length <= 125 && length <= available;
+
     internal static string NetworkName(string value)
     {
         while (System.Text.Encoding.UTF8.GetByteCount(value) > 125)
