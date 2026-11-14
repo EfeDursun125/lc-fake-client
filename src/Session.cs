@@ -15,7 +15,8 @@ internal sealed class Session : IDisposable
     private const string ViewMessage = "LethalFakeClient.Director.v3.View";
     private const string DropMessage = "LethalFakeClient.Director.v4.Drop";
     private const string EmoteMessage = "LethalFakeClient.Director.v10.Emote";
-    private const byte ProtocolVersion = 10;
+    private const string IdentityMessage = "LethalFakeClient.Director.v11.Identity";
+    private const byte ProtocolVersion = 11;
     private const int MaxBots = 128;
     private const int RecordBytes = sizeof(int) + sizeof(float) * 7 + sizeof(byte) * 2 + sizeof(ulong);
     private readonly List<CrewBot> bots = new List<CrewBot>();
@@ -23,6 +24,7 @@ internal sealed class Session : IDisposable
     private readonly HashSet<ulong> peers = new HashSet<ulong>();
     private readonly HashSet<PlayerControllerB> retired = new HashSet<PlayerControllerB>();
     private readonly Dictionary<int, Replica> replicas = new Dictionary<int, Replica>();
+    private readonly Dictionary<int, string> pendingNames = new Dictionary<int, string>();
     private readonly Dictionary<int, string> pendingEmotes = new Dictionary<int, string>();
     private readonly Dictionary<ulong, (Vector3 Position, float Received, bool Valid)> observerViews = new Dictionary<ulong, (Vector3, float, bool)>();
     private readonly List<int> expired = new List<int>();
@@ -54,6 +56,7 @@ internal sealed class Session : IDisposable
         internal Quaternion Rotation;
         internal byte Flags;
         internal bool Jumping;
+        internal bool PortalLook;
         internal byte Emote;
         internal Vector3 LookPoint;
         internal bool ShipAnchored;
@@ -87,7 +90,35 @@ internal sealed class Session : IDisposable
             network.CustomMessagingManager.RegisterNamedMessageHandler(DeathMessage, ReceiveDeath);
             network.CustomMessagingManager.RegisterNamedMessageHandler(DropMessage, ReceiveDroppedItem);
             network.CustomMessagingManager.RegisterNamedMessageHandler(EmoteMessage, ReceiveBotEmote);
+            network.CustomMessagingManager.RegisterNamedMessageHandler(IdentityMessage, ReceiveIdentity);
         }
+    }
+
+    private void SendIdentity(CrewBot bot, ulong client)
+    {
+        string value = BotIdentityPolicy.NetworkName(bot.Body.playerUsername ?? string.Empty);
+        using var packet = new FastBufferWriter(sizeof(int) + 128, Allocator.Temp);
+        packet.WriteValueSafe((int)bot.Body.playerClientId);
+        var name = new FixedString128Bytes(value);
+        packet.WriteValueSafe(name);
+        Network.CustomMessagingManager.SendNamedMessage(IdentityMessage, client, packet, NetworkDelivery.ReliableSequenced);
+    }
+
+    private void ReceiveIdentity(ulong sender, FastBufferReader packet)
+    {
+        var round = StartOfRound.Instance;
+        if (replicaRoundClosed || sender != NetworkManager.ServerClientId || round == null || !packet.TryBeginRead(sizeof(int)))
+            return;
+        packet.ReadValueSafe(out int slot);
+        packet.ReadValueSafe(out FixedString128Bytes name);
+        if ((uint)slot >= (uint)round.allPlayerScripts.Length || round.ClientPlayerList.ContainsValue(slot))
+            return;
+        string value = name.ToString();
+        if (string.IsNullOrWhiteSpace(value))
+            return;
+        pendingNames[slot] = value;
+        if (replicas.TryGetValue(slot, out var replica) && replica.Body.Player != null)
+            BotBody.SetName(replica.Body.Player, value);
     }
 
     internal void SendBotEmote(PlayerControllerB player, string emote)
@@ -198,6 +229,8 @@ internal sealed class Session : IDisposable
             if (version != ProtocolVersion || !peers.Add(sender))
                 return;
             needsFill = true;
+            foreach (var bot in bots)
+                SendIdentity(bot, sender);
         }
     }
 
@@ -660,6 +693,10 @@ internal sealed class Session : IDisposable
         if (count > 0)
         {
             SendState();
+            foreach (ulong client in Network.ConnectedClientsIds)
+                if (client != NetworkManager.ServerClientId && peers.Contains(client))
+                    foreach (var bot in bots)
+                        SendIdentity(bot, client);
             Plugin.Log.LogInfo($"Director deployed {count} crew bots ({bots.Count} active).");
         }
         else if (bots.Count == 0 && BotSettings.BotLimit > 0 && !retry && Time.time >= nextSpawnWarning)
@@ -744,7 +781,7 @@ internal sealed class Session : IDisposable
             replica.Body.SetTerminalPose((replica.Flags & 64) != 0);
             replica.Body.SetLeverPose((replica.Flags & 128) != 0);
             if ((replica.Flags & 32) == 0)
-                replica.Body.SetLook(replica.LookPoint);
+                replica.Body.SetLook(replica.LookPoint, preventDownward: replica.PortalLook);
         }
     }
 
@@ -769,7 +806,7 @@ internal sealed class Session : IDisposable
             packet.WriteValueSafe(bot.Body.transform.eulerAngles.y);
             packet.WriteValueSafe(bot.LookPoint);
             packet.WriteValueSafe((byte)((bot.Walking ? 1 : 0) | (bot.Inside ? 2 : 0) | (bot.Aboard ? 4 : 0) | (bot.Sprinting ? 8 : 0) | (bot.Crouching ? 16 : 0) | (bot.Frozen ? 32 : 0) | (bot.TerminalUsing ? 64 : 0) | (bot.LeverUsing ? 128 : 0)));
-            packet.WriteValueSafe(ShipEmotePolicy.Pack(bot.Jumping, bot.ShipEmote));
+            packet.WriteValueSafe((byte)(ShipEmotePolicy.Pack(bot.Jumping, bot.ShipEmote) | (bot.LookingAtPortal ? 8 : 0)));
             packet.WriteValueSafe(bot.AvatarSteamId);
         }
 
@@ -816,7 +853,10 @@ internal sealed class Session : IDisposable
                     replica.LookPoint = lookPoint;
                     replica.Jumping = (jumpFlag & 1) != 0;
                     replica.Emote = ShipEmotePolicy.Emote(jumpFlag);
+                    replica.PortalLook = (jumpFlag & 8) != 0;
                     replicas.Add(slot, replica);
+                    if (pendingNames.TryGetValue(slot, out string botName))
+                        BotBody.SetName(player, botName);
                     if (replica.Emote != 0 && pendingEmotes.TryGetValue(slot, out string custom))
                         replica.Body.SetCustomEmote(custom);
                     else if (replica.Emote == 0)
@@ -830,6 +870,7 @@ internal sealed class Session : IDisposable
             replica.LookPoint = lookPoint;
             replica.Flags = flags;
             replica.Jumping = (jumpFlag & 1) != 0;
+            replica.PortalLook = (jumpFlag & 8) != 0;
             replica.Emote = ShipEmotePolicy.Emote(jumpFlag);
         }
 
@@ -844,6 +885,7 @@ internal sealed class Session : IDisposable
         foreach (int slot in expired)
         {
             pendingEmotes.Remove(slot);
+            pendingNames.Remove(slot);
             BotAvatars.Remove(replicas[slot].Body.Player);
             replicas[slot].Body.Dispose();
             replicas.Remove(slot);
@@ -894,7 +936,10 @@ internal sealed class Session : IDisposable
     internal void BeforeRevive()
     {
         if (!Network.IsHost)
+        {
             replicaRoundClosed = true;
+            pendingNames.Clear();
+        }
         EndRound();
         if (!Network.IsHost)
         {
@@ -937,6 +982,7 @@ internal sealed class Session : IDisposable
             Network.CustomMessagingManager?.UnregisterNamedMessageHandler(DeathMessage);
             Network.CustomMessagingManager?.UnregisterNamedMessageHandler(DropMessage);
             Network.CustomMessagingManager?.UnregisterNamedMessageHandler(EmoteMessage);
+            Network.CustomMessagingManager?.UnregisterNamedMessageHandler(IdentityMessage);
         }
         EndRound();
         ClearReplicas();

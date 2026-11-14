@@ -10,11 +10,13 @@ namespace LethalFakeClient;
 internal static class BotAvatars
 {
     private static readonly Dictionary<PlayerControllerB, ulong> ids = new Dictionary<PlayerControllerB, ulong>();
+    private static readonly Dictionary<PlayerControllerB, ulong> selections = new Dictionary<PlayerControllerB, ulong>();
     private static readonly List<ulong> candidates = new List<ulong>();
     private static readonly HashSet<ulong> unavailable = new HashSet<ulong>();
 
-    internal static ulong Choose()
+    internal static ulong Choose(out string name)
     {
+        name = string.Empty;
         if (!SteamClient.IsValid)
             return 0;
         candidates.Clear();
@@ -22,7 +24,7 @@ internal static class BotAvatars
         try
         {
             unavailable.Add(SteamClient.SteamId);
-            foreach (ulong assigned in ids.Values)
+            foreach (ulong assigned in selections.Values)
                 if (assigned != 0)
                     unavailable.Add(assigned);
             var round = StartOfRound.Instance;
@@ -40,13 +42,21 @@ internal static class BotAvatars
             }
             if (candidates.Count == 0)
                 return 0;
-            return candidates[UnityEngine.Random.Range(0, candidates.Count)];
+            ulong selected = candidates[UnityEngine.Random.Range(0, candidates.Count)];
+            name = new Friend(selected).Name;
+            return selected;
         }
         catch (Exception error)
         {
-            Plugin.Log.LogWarning($"Could not select a Steam avatar: {error.Message}");
+            Plugin.Log.LogWarning($"Could not select a Steam profile: {error.Message}");
             return 0;
         }
+    }
+
+    internal static void Reserve(PlayerControllerB player, ulong id)
+    {
+        if (player != null && id != 0)
+            selections[player] = id;
     }
 
     internal static void Assign(PlayerControllerB player, ulong id)
@@ -64,12 +74,16 @@ internal static class BotAvatars
     internal static void Remove(PlayerControllerB player)
     {
         if (player != null)
+        {
             ids.Remove(player);
+            selections.Remove(player);
+        }
     }
 
     internal static void Clear()
     {
         ids.Clear();
+        selections.Clear();
         candidates.Clear();
         unavailable.Clear();
     }

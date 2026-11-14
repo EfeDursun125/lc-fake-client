@@ -6,6 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/AreaHazardPolicy.cs" Link="AreaHazardPolicy.cs" />
+    <Compile Include="../../src/BotIdentityPolicy.cs" Link="BotIdentityPolicy.cs" />
     <Compile Include="../../src/RoundStartPolicy.cs" Link="RoundStartPolicy.cs" />
     <Compile Include="../../src/DirectorClock.cs" Link="DirectorClock.cs" />
     <Compile Include="../../src/DeliveryPolicy.cs" Link="DeliveryPolicy.cs" />

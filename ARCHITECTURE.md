@@ -17,7 +17,8 @@ The session owns the Director and bot instances until round cleanup. Before the 
 | State | Key and lifetime | Invalidation / bound |
 | --- | --- | --- |
 | Contacts and round knowledge | Director blackboard, enemy or item | Cleared with the Director; stale contacts expire. |
-| Bot replicas | Session, player slot | Removed when absent from authoritative snapshots, on death or round cleanup; limited by player slots. |
+| Bot replicas and names | Session, player slot | Authoritative host sends profile names reliably; replicas and names are removed on retirement or round cleanup, limited by player slots. |
+| Selected Steam profiles | Bot player slot | Reserved until bot cleanup to avoid selecting a profile twice; real player identities are never changed. |
 | Emote state | Bot body, replicated bot snapshot and reliable custom-emote events | Reset when the bot is no longer idle or is disposed; missing optional mods fall back to a game emote. |
 | Optional emote metadata | `EmoteCompatibility`, reflected mod types and fields | Initialized after soft dependencies; selection lists are rebuilt on each emote choice. |
 | Learned outcomes | Learning instance, outcome key | Persisted across rounds; maximum 2,048 entries. |
@@ -26,7 +27,7 @@ For ordinary travel, bots compare complete NavMesh routes through bounded altern
 
 Area hazards track living Circuit Bee swarms as moving risk areas and place temporary nearby navigation obstacles; bots already within the area can route toward safety. Bots discard carried flashlights aboard using the existing synchronized inventory drop path.
 
-Only idle bots aboard the ship may perform random emotes. Ship operators and bots with active assignments do not emote. The host chooses the emote; snapshots carry the vanilla fallback while reliable events carry optional mod emote names. Custom animation playback is local on each peer, and absent mods use the fallback. Bot aim interpolates toward the existing targets without changing navigation decisions.
+Only idle bots aboard the ship may perform random emotes. Ship operators and bots with active assignments do not emote. The host chooses the emote; snapshots carry the vanilla fallback while reliable events carry optional mod emote names. Custom animation playback is local on each peer, and absent mods use the fallback. Bot aim interpolates toward the existing targets without changing navigation decisions. During entrance transitions, the look target and replicated pitch are restricted to the horizon or above.
 
 ## Helper index
 

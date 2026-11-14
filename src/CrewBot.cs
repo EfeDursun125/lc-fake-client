@@ -215,8 +215,15 @@ internal sealed class CrewBot : IDisposable, IBot
         agent.stoppingDistance = 0.45f;
         agent.autoTraverseOffMeshLink = false;
         body = new BotBody(player);
-        AvatarSteamId = BotSettings.RandomSteamAvatars ? BotAvatars.Choose() : 0UL;
+        ulong profile = 0UL;
+        string steamName = string.Empty;
+        if (BotSettings.RandomSteamAvatars || BotSettings.RandomSteamNames)
+            profile = BotAvatars.Choose(out steamName);
+        BotAvatars.Reserve(player, profile);
+        AvatarSteamId = BotSettings.RandomSteamAvatars ? profile : 0UL;
         BotAvatars.Assign(player, AvatarSteamId);
+        if (BotSettings.RandomSteamNames && !string.IsNullOrWhiteSpace(steamName))
+            BotBody.SetName(player, BotIdentityPolicy.NetworkName(steamName));
         body.Pose(agent.transform.position, Quaternion.identity, false, false, Aboard);
         director.Add(this);
     }
@@ -330,6 +337,7 @@ internal sealed class CrewBot : IDisposable, IBot
     internal bool Jumping => jumping || bridgeFalling;
     internal byte ShipEmote => shipEmote;
     internal Vector3 LookPoint => lookPoint;
+    internal bool LookingAtPortal => openingPortal != null;
     internal bool Crouching => crouching;
     internal bool Frozen => frozen;
     internal bool Died => body.Dead || Body != null && Body.isPlayerDead;
@@ -758,6 +766,12 @@ internal sealed class CrewBot : IDisposable, IBot
             if (forward.sqrMagnitude > 0.01f)
                 lookPoint = Position + Quaternion.Euler(0f, Mathf.Clamp(scanAngle, -60f, 60f), 0f) * forward.normalized * 12f + Vector3.up * scanHeight;
         }
+        if (openingPortal != null && openingPortal.entrancePoint != null)
+        {
+            scanning = false;
+            lookPoint = openingPortal.entrancePoint.position;
+            lookPoint.y = Mathf.Max(lookPoint.y + 1.2f, Body.gameplayCamera.transform.position.y);
+        }
         bool sprinting = walking && !crouching && (threateningWorm != null || now < spikeSprintUntil || order.Kind == TaskKind.Evade || Inside && now < retreatUntil || now < turretEscapeUntil || now < nutcrackerEscapeUntil || !Inside && !Aboard) &&
             StaminaPolicy.CanSprint(Body.sprintMeter, Body.isSprinting && staminaWalking, Body.criticallyInjured,
                 Body.isMovementHindered > 0, !Inside && !Aboard && threateningWorm == null);
@@ -790,7 +804,7 @@ internal sealed class CrewBot : IDisposable, IBot
         body.Pose(Position, rotation, walking, Inside, Aboard, sprinting, velocity);
         body.SetCrouching(crouching);
         if (!frozen)
-            body.SetLook(lookPoint, aimSpeed);
+            body.SetLook(lookPoint, aimSpeed, LookingAtPortal);
     }
 
     private void UpdateShipEmote(float now, bool walking)

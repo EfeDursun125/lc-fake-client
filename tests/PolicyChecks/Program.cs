@@ -17,6 +17,10 @@ Check(RoundStartPolicy.CanAcceptNewRound(true, false, false), "replicas reopen a
 Check(NutcrackerPolicy.HasTarget(2, 0, 4), "attacking nutcracker has a valid target");
 Check(!HoarderPolicy.IsHostile(0, false) && !HoarderPolicy.IsHostile(1, false), "passive hoarding bug is not a threat");
 Check(MeleePolicy.ShouldSwingMasked(2f, 10f), "masked inside immediate melee range");
+Check(ShipEmotePolicy.Emote((byte)(ShipEmotePolicy.Pack(true, 2) | 8)) == 2, "portal look flag preserves emote encoding");
+string longName = string.Concat(System.Linq.Enumerable.Repeat("🎮", 40));
+string truncatedName = BotIdentityPolicy.NetworkName(longName);
+Check(truncatedName == string.Concat(System.Linq.Enumerable.Repeat("🎮", 31)), "long Steam names preserve complete UTF-8 characters");
 Check(ShipEmotePolicy.Emote(ShipEmotePolicy.Pack(false, 1)) == 1, "first emote survives network encoding");
 Check(ShipEmotePolicy.CanPerform(true, false, false, true, false), "idle crew aboard can emote");
 Check(!ShipEmotePolicy.CanPerform(true, false, true, true, false), "ship operator cannot idle emote");

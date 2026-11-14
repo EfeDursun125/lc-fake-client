@@ -7,6 +7,7 @@ internal static class BotSettings
 {
     private static ConfigEntry<int> botLimit = null!;
     private static ConfigEntry<bool> randomSteamAvatars = null!;
+    private static ConfigEntry<bool> randomSteamNames = null!;
     private static ConfigEntry<float> viewAngle = null!;
     private static ConfigEntry<float> riskTolerance = null!;
     private static ConfigEntry<bool> collectItems = null!;
@@ -20,6 +21,7 @@ internal static class BotSettings
 
     internal static int BotLimit => Mathf.Clamp(botLimit.Value, 0, 128);
     internal static bool RandomSteamAvatars => randomSteamAvatars.Value;
+    internal static bool RandomSteamNames => randomSteamNames.Value;
     internal static float ViewAngle => Mathf.Clamp(viewAngle.Value, 60f, 360f);
     internal static float RiskTolerance => Mathf.Clamp(riskTolerance.Value, 0.5f, 1.5f);
     internal static bool CollectItems => collectItems.Value;
@@ -46,6 +48,7 @@ internal static class BotSettings
     {
         botLimit = config.Bind("Crew", "BotLimit", 128, "Maximum bots, limited by available player slots.");
         randomSteamAvatars = config.Bind("Crew", "RandomSteamAvatars", false, "Show randomly chosen Steam profile pictures for dead bots in the spectator UI. The host controls this setting.");
+        randomSteamNames = config.Bind("Crew", "RandomSteamNames", false, "Use random Steam friend names for bots. The host controls this setting; unavailable names fall back to Crew Bot.");
         viewAngle = config.Bind("Perception", "ViewAngle", 210f, "Horizontal field of view in degrees; very close threats are always noticed.");
         riskTolerance = config.Bind("Behavior", "RiskTolerance", 1f, "Risk tolerance from 0.5 (cautious) to 1.5 (bold).");
         collectItems = config.Bind("Behavior", "CollectItems", true, "Assign scrap collection tasks.");

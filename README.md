@@ -65,6 +65,7 @@ The Director remembers observed indoor scrap for the current round, considers es
 BepInEx creates `BepInEx/config/dev.lethalfakeclient.cfg` after the first launch. The host controls bot decisions.
 
 - `Crew.BotLimit`: maximum bots (0–128; available player slots still apply).
+- `Crew.RandomSteamNames`: use randomly selected Steam friend names for bots (default disabled; host setting). Names are synchronized to compatible peers. Friends already in the lobby or playing the game are excluded; if no name is available, the default bot name is used.
 - `Crew.RandomSteamAvatars`: show Steam profile pictures for dead bots in the spectator UI (default disabled; host setting). IDs are selected without duplicates from the host's Steam friends who are not playing Lethal Company or connected to the lobby. If no unused profile is available, the bot uses the default picture. Other peers need the same plugin version.
 - `Perception.ViewAngle`: horizontal view angle in degrees (60–360).
 - `Behavior.RiskTolerance`: risk tolerance (0.5–1.5).

@@ -127,7 +127,7 @@ internal sealed class BotBody : IDisposable
         active.Add(player, this);
         player.gameObject.SetActive(true);
         root.localScale = Vector3.one;
-        player.playerUsername = $"Crew Bot {player.playerClientId}";
+        SetName(player, $"Crew Bot {player.playerClientId}");
         player.actualClientId = NetworkManager.ServerClientId;
         player.health = 100;
         player.sprintMeter = 1f;
@@ -413,14 +413,30 @@ internal sealed class BotBody : IDisposable
             animator.SetTrigger(animation);
     }
 
-    internal void SetLook(Vector3 point, float aimSpeed = 320f)
+    internal static void SetName(PlayerControllerB player, string name)
+    {
+        player.playerUsername = name;
+        if (player.usernameBillboardText != null)
+            player.usernameBillboardText.text = name;
+    }
+
+    internal void SetLook(Vector3 point, float aimSpeed = 320f, bool preventDownward = false)
     {
         if ((point - Player.gameplayCamera.transform.position).sqrMagnitude < 0.01f)
-            return;
+        {
+            if (!preventDownward)
+                return;
+            point = Player.gameplayCamera.transform.position + Player.transform.forward;
+        }
         lookPoint = point;
         Vector3 localDirection = Player.transform.InverseTransformDirection(point - Player.gameplayCamera.transform.position);
         float pitch = Mathf.Clamp(-Mathf.Atan2(localDirection.y, new Vector2(localDirection.x, localDirection.z).magnitude) * Mathf.Rad2Deg, -80f, 80f);
         lookPitch = Mathf.SmoothDampAngle(lookPitch, pitch, ref lookPitchVelocity, 0.12f, aimSpeed, Time.deltaTime);
+        if (preventDownward && lookPitch > 0f)
+        {
+            lookPitch = 0f;
+            lookPitchVelocity = 0f;
+        }
         Player.gameplayCamera.transform.rotation = Quaternion.Euler(lookPitch, Player.transform.eulerAngles.y, 0f);
         Player.playerEye.position = Player.gameplayCamera.transform.position;
         Player.playerEye.rotation = Player.gameplayCamera.transform.rotation;
@@ -874,7 +890,7 @@ internal sealed class BotBody : IDisposable
         Player.isInsideFactory = wasInside;
         Player.isInElevator = wasInElevator;
         Player.isInHangarShipRoom = wasInShip;
-        Player.playerUsername = oldName;
+        SetName(Player, oldName);
         Player.actualClientId = oldActualId;
         Player.health = oldHealth;
         Player.sprintMeter = oldStamina;
