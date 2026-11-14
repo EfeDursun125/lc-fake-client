@@ -102,6 +102,7 @@ internal sealed class Director
     private bool facilityCrewPresent;
     private IBot? guardian;
     private IBot? elevatorOwner;
+    private readonly Dictionary<IBot, int> elevatorSeats = new Dictionary<IBot, int>();
     private float elevatorLease;
     private float nextElevatorAction;
     private float nextShipSupport;
@@ -1093,10 +1094,40 @@ internal sealed class Director
     internal bool ReserveElevator(IBot bot, float now)
     {
         if (elevatorOwner != null && elevatorOwner != bot && elevatorOwner.Available && now < elevatorLease)
-            return elevatorOwner is CrewBot owner && owner.ElevatorBoarding && TryJoinElevator(bot, out _);
-        elevatorOwner = bot;
-        elevatorLease = now + 60f;
+        {
+            if (!elevatorSeats.ContainsKey(bot) && !TryJoinElevator(bot, out _))
+                return false;
+        }
+        else
+        {
+            elevatorOwner = bot;
+            elevatorLease = now + 60f;
+        }
+        if (elevatorSeats.ContainsKey(bot))
+            return true;
+        int occupied = 0;
+        foreach (int seat in elevatorSeats.Values)
+            occupied |= 1 << seat;
+        int availableSeat = MineshaftPolicy.FreeSeat(occupied);
+        if (availableSeat < 0)
+            return false;
+        elevatorSeats.Add(bot, availableSeat);
         return true;
+    }
+
+    internal Vector3 ElevatorBoardingPoint(IBot bot)
+    {
+        var lift = Elevator!;
+        if (!elevatorSeats.TryGetValue(bot, out int seat))
+            return lift.elevatorInsidePoint.position;
+        Vector3 side = lift.elevatorInsidePoint.right;
+        Vector3 forward = lift.elevatorInsidePoint.forward;
+        side.y = 0f;
+        forward.y = 0f;
+        Vector3 point = lift.elevatorInsidePoint.position + side.normalized * ((seat & 1) == 0 ? -0.4f : 0.4f) +
+            forward.normalized * (seat < 2 ? 0.4f : -0.4f);
+        Vector3 closest = lift.elevatorBounds.bounds.ClosestPoint(point + Vector3.up * 0.5f);
+        return new Vector3(closest.x, point.y, closest.z);
     }
 
     internal bool TryJoinElevator(IBot bot, out Vector3 goal)
@@ -1105,6 +1136,7 @@ internal sealed class Director
         if (Elevator == null || Elevator.elevatorTopPoint == null || Elevator.elevatorBottomPoint == null ||
             Elevator.elevatorBounds == null || Elevator.elevatorInsidePoint == null || !(elevatorOwner is CrewBot owner) || owner == bot ||
             !owner.Available || !owner.ElevatorBoarding || !bot.Available || !bot.Inside ||
+            !elevatorSeats.ContainsKey(bot) && elevatorSeats.Count >= MineshaftPolicy.Seats ||
             (bot.Position - Elevator.elevatorInsidePoint.position).sqrMagnitude > 144f)
             return false;
         goal = owner.ElevatorGoingDown ? Elevator.elevatorBottomPoint.position : Elevator.elevatorTopPoint.position;
@@ -1123,8 +1155,7 @@ internal sealed class Director
             return false;
         foreach (var bot in bots)
         {
-            if (bot == owner || !bot.Available || !bot.Inside ||
-                Elevator.elevatorBounds.bounds.Contains(bot.Body.transform.position + Vector3.up * 0.5f))
+            if (bot == owner || !bot.Available || !bot.Inside || bot is CrewBot passenger && passenger.ElevatorRiding)
                 continue;
             if (TryJoinElevator(bot, out _))
                 return true;
@@ -1134,6 +1165,7 @@ internal sealed class Director
 
     internal void ReleaseElevator(IBot bot)
     {
+        elevatorSeats.Remove(bot);
         if (elevatorOwner == bot)
         {
             elevatorOwner = null;

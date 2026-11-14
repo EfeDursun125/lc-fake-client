@@ -108,6 +108,7 @@ internal sealed class CrewBot : IDisposable, IBot
     private Vector3 liftProgressPosition;
     private Vector3 liftOffset;
     private Vector3 liftApproach;
+    private Vector3 liftBoardTarget;
     private Vector3 liftExitPosition;
     private bool liftBoardingOnNavMesh;
     private float liftBoardedAt;
@@ -261,6 +262,7 @@ internal sealed class CrewBot : IDisposable, IBot
     public bool CanGuard => Available && liftPhase == LiftPhase.None && (Aboard || agent.isOnNavMesh && Time.time >= blockedUntil);
     public bool ElevatorTransit => liftPhase != LiftPhase.None;
     internal bool ElevatorBoarding => liftPhase == LiftPhase.Board || liftPhase == LiftPhase.Ride;
+    internal bool ElevatorRiding => liftPhase == LiftPhase.Ride || liftPhase == LiftPhase.Exit;
     internal bool ElevatorGoingDown => liftGoingDown;
     private static bool IsCargo(GrabbableObject? item)
     {
@@ -3459,9 +3461,10 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
 
         liftPhase = LiftPhase.Board;
+        liftBoardTarget = director.ElevatorBoardingPoint(this);
         liftProgressPosition = Body.transform.position;
         liftProgressTime = now;
-        liftBoardingOnNavMesh = NavMesh.SamplePosition(lift.elevatorInsidePoint.position, out var inside, 1f, agent.areaMask) &&
+        liftBoardingOnNavMesh = NavMesh.SamplePosition(liftBoardTarget, out var inside, 0.5f, agent.areaMask) &&
             lift.elevatorBounds.bounds.Contains(inside.position + Vector3.up * 0.5f) &&
             agent.CalculatePath(inside.position, candidatePath) && candidatePath.status == NavMeshPathStatus.PathComplete &&
             agent.SetPath(candidatePath);
@@ -3485,7 +3488,17 @@ internal sealed class CrewBot : IDisposable, IBot
         {
             if (!lift.elevatorFinishedMoving || !lift.elevatorDoorOpen)
             {
-                AbortElevator();
+                if (lift.elevatorBounds.bounds.Contains(Body.transform.position + Vector3.up * 0.5f))
+                {
+                    liftOffset = lift.elevatorInsidePoint.InverseTransformPoint(Body.transform.position);
+                    liftPhase = LiftPhase.Ride;
+                    liftBoardedAt = now;
+                    liftBoardingOnNavMesh = false;
+                    if (agent.enabled)
+                        agent.enabled = false;
+                }
+                else
+                    AbortElevator();
                 return;
             }
             if (liftBoardingOnNavMesh && agent.enabled && agent.isOnNavMesh)
@@ -3508,9 +3521,9 @@ internal sealed class CrewBot : IDisposable, IBot
                     liftProgressTime = now;
                 }
             }
-            Vector3 toCenter = Body.transform.position - lift.elevatorInsidePoint.position;
-            toCenter.y = 0f;
-            if (lift.elevatorBounds.bounds.Contains(Body.transform.position + Vector3.up * 0.5f) && toCenter.sqrMagnitude < 2.25f)
+            Vector3 toSeat = Body.transform.position - liftBoardTarget;
+            toSeat.y = 0f;
+            if (lift.elevatorBounds.bounds.Contains(Body.transform.position + Vector3.up * 0.5f) && toSeat.sqrMagnitude < 0.25f)
             {
                 liftOffset = lift.elevatorInsidePoint.InverseTransformPoint(Body.transform.position);
                 liftPhase = LiftPhase.Ride;
@@ -3522,7 +3535,7 @@ internal sealed class CrewBot : IDisposable, IBot
                 return;
             }
             if (!liftBoardingOnNavMesh)
-                MoveInsideElevator(lift.elevatorInsidePoint.position, now);
+                MoveInsideElevator(liftBoardTarget, now);
             return;
         }
 

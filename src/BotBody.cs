@@ -82,9 +82,48 @@ internal sealed class BotBody : IDisposable
     private GrabbableObject? animatedItem;
     private string? grabAnimation;
     private float holdingWeight;
+    private Vector3 motionPosition;
+    private Quaternion motionLook;
+    private float lastMotionSample = float.NegativeInfinity;
+    private float lastPhysicalMove = float.NegativeInfinity;
+    private float lastLookMove = float.NegativeInfinity;
+    private int motionFrame = -1;
 
     internal PlayerControllerB Player { get; }
     internal bool WalkingNow => walking;
+    internal bool MovingForNutcracker(float distance)
+    {
+        float now = Time.time;
+        if (motionFrame != Time.frameCount)
+        {
+            motionFrame = Time.frameCount;
+            Vector3 position = Player.transform.position;
+            Quaternion look = Player.gameplayCamera.transform.rotation;
+            if (now - lastMotionSample > 0.4f)
+            {
+                motionPosition = position;
+                motionLook = look;
+                lastPhysicalMove = float.NegativeInfinity;
+                lastLookMove = float.NegativeInfinity;
+            }
+            else
+            {
+                if ((position - motionPosition).sqrMagnitude >= 0.0001f)
+                {
+                    motionPosition = position;
+                    lastPhysicalMove = now;
+                }
+                if (Quaternion.Angle(look, motionLook) >= 2f)
+                {
+                    motionLook = look;
+                    lastLookMove = now;
+                }
+            }
+            lastMotionSample = now;
+        }
+        return NutcrackerPolicy.Moving(Player.performingEmote, now - lastPhysicalMove, now - lastLookMove, distance);
+    }
+
     internal bool TerminalUsing => terminalUsing;
     internal bool LeverUsing => leverUsing;
     internal bool DropPending => pendingDrop != null;

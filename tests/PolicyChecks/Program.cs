@@ -23,6 +23,11 @@ using (BotHudScope.Enter())
     Check(BotHudScope.Active, "outer bot item action remains suppressed");
 }
 Check(!BotHudScope.Active, "normal player HUD resumes after bot item action");
+Check(!NutcrackerPolicy.Moving(false, 1f, 1f, 2f), "nutcracker ignores a stationary bot with a still view");
+Check(NutcrackerPolicy.Moving(false, 0f, 1f, 20f), "nutcracker detects actual movement");
+Check(NutcrackerPolicy.Moving(false, 1f, 0f, 5f) && !NutcrackerPolicy.Moving(false, 1f, 0f, 15f), "nutcracker detects close camera turns");
+Check(NutcrackerPolicy.Moving(true, 1f, 1f, 20f), "nutcracker detects an emote");
+Check(MineshaftPolicy.FreeSeat(0) == 0 && MineshaftPolicy.FreeSeat(1) == 1 && MineshaftPolicy.FreeSeat(15) == -1, "elevator allocates distinct bounded passenger places");
 Check(NutcrackerPolicy.HasTarget(2, 0, 4), "attacking nutcracker has a valid target");
 Check(!HoarderPolicy.IsHostile(0, false) && !HoarderPolicy.IsHostile(1, false), "passive hoarding bug is not a threat");
 Check(MeleePolicy.ShouldSwingMasked(2f, 10f), "masked inside immediate melee range");

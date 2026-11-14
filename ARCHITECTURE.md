@@ -24,7 +24,11 @@ The session owns the Director and bot instances until round cleanup. Before the 
 | Selected Steam profiles | Bot player slot | Reserved until bot cleanup to avoid selecting a profile twice; real player identities are never changed. |
 | Emote state | Bot body, replicated bot snapshot and reliable custom-emote events | Reset when the bot is no longer idle or is disposed; missing optional mods fall back to a game emote. |
 | Optional emote metadata | `EmoteCompatibility`, reflected mod types and fields | Initialized after soft dependencies; selection lists are rebuilt on each emote choice. |
+| Mineshaft elevator seats | Director, participating bot | Up to four distinct boarding positions are reserved until each bot exits or aborts; only the owner operates the controls. |
+| Nutcracker movement samples | Bot body, frame | Reset after observation gaps; actual position and camera rotation are sampled once per frame. |
 | Learned outcomes | Learning instance, outcome key | Persisted across rounds; maximum 2,048 entries. |
+
+Bots sharing a mineshaft trip board assigned positions and the controlling bot waits briefly for eligible nearby crew. Nutcracker bot detection uses observed displacement, close-range camera turns and emotes rather than a potentially stale walking animation flag.
 
 For ordinary travel, bots compare complete NavMesh routes through bounded alternate waypoints by length and shared risk, including observed enemies, environmental hazards, death locations, and spike crossings. They validate both legs against existing hazards and keep immediate escape behavior separate; the NavMesh polygons themselves are not modified.
 

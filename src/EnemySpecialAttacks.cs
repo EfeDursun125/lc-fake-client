@@ -114,9 +114,10 @@ internal static class EnemySpecialAttacks
         {
             foreach (var player in BotBody.Players)
             {
-                if (player == null || !BotBody.TryGet(player, out var body) || body.Dead || !body.WalkingNow ||
+                if (player == null || !BotBody.TryGet(player, out var body) || body.Dead ||
                     !__instance.PlayerIsTargetable(player) ||
-                    !__instance.CheckLineOfSightForPosition(player.gameplayCamera.transform.position, 70f, 60, 1f))
+                    !__instance.CheckLineOfSightForPosition(player.gameplayCamera.transform.position, 70f, 60, 1f) ||
+                    !body.MovingForNutcracker(Vector3.Distance(player.transform.position, __instance.transform.position)))
                     continue;
                 ___isInspecting = false;
                 __instance.SeeMovingThreatServerRpc((int)player.playerClientId);
