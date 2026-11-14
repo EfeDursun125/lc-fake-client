@@ -6,8 +6,16 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/DirectorClock.cs" Link="DirectorClock.cs" />
+    <Compile Include="../../src/DeliveryPolicy.cs" Link="DeliveryPolicy.cs" />
+    <Compile Include="../../src/BotRolePolicy.cs" Link="BotRolePolicy.cs" />
+    <Compile Include="../../src/CoordinationPolicy.cs" Link="CoordinationPolicy.cs" />
     <Compile Include="../../src/MovementPolicy.cs" Link="MovementPolicy.cs" />
+    <Compile Include="../../src/MeleePolicy.cs" Link="MeleePolicy.cs" />
+    <Compile Include="../../src/ShipEmotePolicy.cs" Link="ShipEmotePolicy.cs" />
+    <Compile Include="../../src/HoarderPolicy.cs" Link="HoarderPolicy.cs" />
+    <Compile Include="../../src/MineshaftPolicy.cs" Link="MineshaftPolicy.cs" />
     <Compile Include="../../src/NutcrackerPolicy.cs" Link="NutcrackerPolicy.cs" />
+    <Compile Include="../../src/ReplicaPolicy.cs" Link="ReplicaPolicy.cs" />
     <Compile Include="../../src/SpikeTimingPolicy.cs" Link="SpikeTimingPolicy.cs" />
   </ItemGroup>
 </Project>

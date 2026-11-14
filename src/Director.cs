@@ -9,6 +9,8 @@ internal sealed class Director
 {
     private static readonly AccessTools.FieldRef<Terminal, InteractTrigger> TerminalTrigger =
         AccessTools.FieldRefAccess<Terminal, InteractTrigger>("terminalTrigger");
+    private static readonly AccessTools.FieldRef<ItemDropship, List<int>> DropshipOrders =
+        AccessTools.FieldRefAccess<ItemDropship, List<int>>("itemsToDeliver");
     private sealed class ExitFailureState
     {
         internal readonly Dictionary<int, float> Failed = new Dictionary<int, float>();
@@ -26,6 +28,8 @@ internal sealed class Director
     private readonly HashSet<IBot> assigned = new HashSet<IBot>();
     private readonly HashSet<GrabbableObject> reserved = new HashSet<GrabbableObject>();
     private readonly Dictionary<GrabbableObject, IBot> lootOwners = new Dictionary<GrabbableObject, IBot>();
+    private readonly Dictionary<GrabbableObject, (IBot Receiver, float Until)> equipmentHandoffs = new Dictionary<GrabbableObject, (IBot, float)>();
+    private readonly List<GrabbableObject> expiredHandoffs = new List<GrabbableObject>();
     private readonly List<IBot> explorationOwners = new List<IBot>();
     private readonly Dictionary<IBot, BotRole> roles = new Dictionary<IBot, BotRole>();
     private readonly List<IBot> roleCandidates = new List<IBot>();
@@ -38,6 +42,11 @@ internal sealed class Director
     private readonly Dictionary<Vector3Int, float> visits = new Dictionary<Vector3Int, float>();
     private readonly Dictionary<GameNetcodeStuff.PlayerControllerB, Vector3> lastVisits = new Dictionary<GameNetcodeStuff.PlayerControllerB, Vector3>();
     private readonly List<EntranceTeleport> entrances = new List<EntranceTeleport>();
+    private readonly List<NavMeshLinkInstance> jumpLinks = new List<NavMeshLinkInstance>();
+    private readonly List<(Vector3 Start, Vector3 End)> jumpEndpoints = new List<(Vector3, Vector3)>();
+    private readonly Dictionary<(Vector3Int, Vector3Int), float> jumpLinkAttempts = new Dictionary<(Vector3Int, Vector3Int), float>();
+    private SteamValveHazard[] steamValves = System.Array.Empty<SteamValveHazard>();
+    private float nextValveRefresh;
     private readonly List<TerminalAccessibleObject> terminalDevices = new List<TerminalAccessibleObject>();
     private readonly List<Vector3> outsideNodes = new List<Vector3>();
     private readonly List<Vector3> insideNodes = new List<Vector3>();
@@ -62,6 +71,12 @@ internal sealed class Director
     private ShipTeleporter? teleporter;
     private Terminal? shipTerminal;
     private HangarShipDoor? hangarDoor;
+    private ItemDropship? dropship;
+    private InteractTrigger? lightsSwitch;
+    private float nextLightsSearch;
+    private float nextLightsAction;
+    private readonly Dictionary<GameNetcodeStuff.PlayerControllerB, float> recentTeleports = new Dictionary<GameNetcodeStuff.PlayerControllerB, float>();
+    private IBot? doorOperator;
     private StartMatchLever? departureLever;
     private CrewBot? departureBot;
     private float departureAnimationUntil;
@@ -250,10 +265,120 @@ internal sealed class Director
         return key != null ? learning.Estimate(key) : 0f;
     }
     internal Vector3 Ship => ship;
+    internal ItemDropship? Dropship => dropship;
     internal IReadOnlyList<Vector3> IndoorNodes => insideNodes;
     internal IReadOnlyList<Vector3> OutdoorNodes => outsideNodes;
     internal bool ShipOpen => !round.hangarDoorsClosed;
-    internal MineshaftElevatorController? Elevator { get; }
+    internal bool EarlyDepartureVote => DirectorClock.EarlyVoteReturn(round.shipHasLanded, round.shipIsLeaving,
+        round.inShipPhase, TimeOfDay.Instance != null ? TimeOfDay.Instance.votesForShipToLeaveEarly : 0);
+
+    internal IBot? NearbyLookingCompanion(IBot bot)
+    {
+        IBot? closest = null;
+        float best = 25f;
+        foreach (var other in bots)
+        {
+            if (other == bot || !other.Available || other.Inside != bot.Inside || other.Aboard != bot.Aboard)
+                continue;
+            float distance = (other.Position - bot.Position).sqrMagnitude;
+            if (distance >= best)
+                continue;
+            closest = other;
+            best = distance;
+        }
+        return closest;
+    }
+    internal MineshaftElevatorController? Elevator { get; private set; }
+    internal BridgeTraffic Bridges { get; } = new BridgeTraffic();
+
+    internal bool TryJumpLink(NavMeshAgent agent, Vector3 start, Vector3 end, bool inside, float now)
+    {
+        Vector3 delta = end - start;
+        float height = delta.y;
+        delta.y = 0f;
+        if (!MovementPolicy.CanJumpGap(delta.sqrMagnitude, height) || jumpLinks.Count >= 64)
+            return false;
+        var key = (Vector3Int.FloorToInt(start), Vector3Int.FloorToInt(end));
+        if (jumpLinkAttempts.TryGetValue(key, out float retry) && now < retry)
+            return false;
+        if (jumpLinkAttempts.Count >= 512)
+            jumpLinkAttempts.Clear();
+        jumpLinkAttempts[key] = now + 10f;
+        Vector3 direction = delta.normalized;
+        if (!NavMesh.SamplePosition(start - direction * 0.35f, out var takeoff, 0.6f, agent.areaMask) ||
+            !NavMesh.SamplePosition(end + direction * 0.35f, out var landing, 0.6f, agent.areaMask))
+            return false;
+        if (!JumpPathSafe(takeoff.position, landing.position, inside))
+            return false;
+
+        var link = NavMesh.AddLink(new NavMeshLinkData
+        {
+            startPosition = takeoff.position,
+            endPosition = landing.position,
+            bidirectional = true,
+            width = 0.5f,
+            costModifier = 2f,
+            area = 0,
+            agentTypeID = agent.agentTypeID
+        });
+        if (!link.valid)
+            return false;
+        if (!agent.CalculatePath(landing.position, planningPath) || planningPath.status != NavMeshPathStatus.PathComplete)
+        {
+            link.Remove();
+            return false;
+        }
+        jumpLinks.Add(link);
+        jumpEndpoints.Add((takeoff.position, landing.position));
+        Plugin.Log.LogInfo($"Created {(inside ? "indoor" : "outdoor")} jump route from {takeoff.position} to {landing.position}.");
+        return true;
+    }
+
+    internal bool JumpPathSafe(Vector3 start, Vector3 end, bool inside)
+    {
+        if (inside && Board.Spikes.Crossing(start, end, true) != null)
+            return false;
+        Vector3 previous = start + Vector3.up * 0.65f;
+        for (int index = 0; index <= 8; index++)
+        {
+            Vector3 point = Vector3.Lerp(start, end, index / 8f);
+            if (Board.AreaRisk(point, inside) >= 0.35f || Board.StaticEnvironmentalRisk(point, inside) >= 0.35f)
+                return false;
+        }
+        for (int index = 1; index <= 8; index++)
+        {
+            float t = index / 8f;
+            Vector3 next = Vector3.Lerp(start, end, t) +
+                Vector3.up * (0.65f + 1.5f * 4f * t * (1f - t));
+            Vector3 segment = next - previous;
+            if (Physics.SphereCast(previous, 0.3f, segment.normalized, out _, segment.magnitude,
+                Board.SightMask, QueryTriggerInteraction.Ignore) ||
+                Physics.SphereCast(previous + Vector3.up * 0.8f, 0.3f, segment.normalized, out _, segment.magnitude,
+                    Board.SightMask, QueryTriggerInteraction.Ignore))
+                return false;
+            previous = next;
+        }
+        return true;
+    }
+
+    internal bool IsJumpLink(Vector3 start, Vector3 end)
+    {
+        foreach (var link in jumpEndpoints)
+            if ((link.Start - start).sqrMagnitude < 1f && (link.End - end).sqrMagnitude < 1f ||
+                (link.Start - end).sqrMagnitude < 1f && (link.End - start).sqrMagnitude < 1f)
+                return true;
+        return false;
+    }
+
+    internal SteamValveHazard[] SteamValves(float now)
+    {
+        if (now >= nextValveRefresh)
+        {
+            steamValves = UnityEngine.Object.FindObjectsOfType<SteamValveHazard>();
+            nextValveRefresh = now + 10f;
+        }
+        return steamValves;
+    }
 
     internal Director(StartOfRound round, Learning learning, System.Func<Vector3, bool> hiddenFromHumanViews)
     {
@@ -274,6 +399,7 @@ internal sealed class Director
         FindTeleporter();
         shipTerminal = UnityEngine.Object.FindObjectOfType<Terminal>();
         hangarDoor = UnityEngine.Object.FindObjectOfType<HangarShipDoor>();
+        dropship = UnityEngine.Object.FindObjectOfType<ItemDropship>();
         departureLever = UnityEngine.Object.FindObjectOfType<StartMatchLever>();
         Elevator = UnityEngine.Object.FindObjectOfType<MineshaftElevatorController>();
         this.learning = learning;
@@ -396,6 +522,8 @@ internal sealed class Director
             }
 
             door.OpenOrCloseDoor(bot.Body);
+            if (pair.Value.boolValue)
+                Board.RouteRecovered(goal);
             return pair.Value.boolValue;
         }
 
@@ -746,6 +874,12 @@ internal sealed class Director
             exitFailures.Add(bot.Body, state);
         }
         state.Failed[id] = now + 45f;
+        foreach (var entrance in entrances)
+            if (entrance != null && !entrance.isEntranceToBuilding && entrance.entranceId == id && entrance.entrancePoint != null)
+            {
+                Board.RouteFailed(entrance.entrancePoint.position);
+                break;
+            }
         escapePlans.Remove(bot);
         bool any = false;
         bool allFailed = true;
@@ -765,6 +899,8 @@ internal sealed class Director
 
     internal float RecordRouteFailure(IBot bot, int exitId, Vector3 target, string cause, float now)
     {
+        if (cause == "door" || cause == "navmesh_partial")
+            Board.RouteFailed(target);
         float retryDelay = 8f;
         int attempt = 1;
         if (exitId >= 0)
@@ -849,6 +985,12 @@ internal sealed class Director
 
     internal void ExitCompleted(IBot bot, int id)
     {
+        foreach (var entrance in entrances)
+            if (entrance != null && !entrance.isEntranceToBuilding && entrance.entranceId == id && entrance.entrancePoint != null)
+            {
+                Board.RouteRecovered(entrance.entrancePoint.position);
+                break;
+            }
         if (!exitFailures.TryGetValue(bot.Body, out var state))
             return;
         state.Failed.Remove(id);
@@ -945,19 +1087,49 @@ internal sealed class Director
             return false;
         float top = Elevator.elevatorTopPoint.position.y;
         float bottom = Elevator.elevatorBottomPoint.position.y;
-        if (Mathf.Abs(top - bottom) < 6f)
-            return false;
-        float middle = (top + bottom) * 0.5f;
-        return (from.y - middle) * (to.y - middle) < 0f;
+        return MineshaftPolicy.DifferentFloors(from.y, to.y, top, bottom);
     }
 
     internal bool ReserveElevator(IBot bot, float now)
     {
         if (elevatorOwner != null && elevatorOwner != bot && elevatorOwner.Available && now < elevatorLease)
-            return false;
+            return elevatorOwner is CrewBot owner && owner.ElevatorBoarding && TryJoinElevator(bot, out _);
         elevatorOwner = bot;
         elevatorLease = now + 60f;
         return true;
+    }
+
+    internal bool TryJoinElevator(IBot bot, out Vector3 goal)
+    {
+        goal = default;
+        if (Elevator == null || Elevator.elevatorTopPoint == null || Elevator.elevatorBottomPoint == null ||
+            Elevator.elevatorBounds == null || Elevator.elevatorInsidePoint == null || !(elevatorOwner is CrewBot owner) || owner == bot ||
+            !owner.Available || !owner.ElevatorBoarding || !bot.Available || !bot.Inside ||
+            (bot.Position - Elevator.elevatorInsidePoint.position).sqrMagnitude > 144f)
+            return false;
+        goal = owner.ElevatorGoingDown ? Elevator.elevatorBottomPoint.position : Elevator.elevatorTopPoint.position;
+        if (!DifferentElevatorFloors(bot.Position, goal))
+            return false;
+        return bot.Order.Kind == TaskKind.Escort && bot.Order.Partner == owner ||
+            DifferentElevatorFloors(bot.Position, bot.Order.Point) &&
+            (owner.ElevatorGoingDown ? bot.Order.Point.y < bot.Position.y : bot.Order.Point.y > bot.Position.y);
+    }
+
+    internal bool WaitForElevatorCrew(IBot owner, bool goingDown, float boardedAt, float now)
+    {
+        if (Elevator == null || Elevator.elevatorBounds == null ||
+            !MineshaftPolicy.WaitForCrew(owner == elevatorOwner, Board.Risk(owner.Position, true, now, false) < 0.35f,
+                true, now - boardedAt))
+            return false;
+        foreach (var bot in bots)
+        {
+            if (bot == owner || !bot.Available || !bot.Inside ||
+                Elevator.elevatorBounds.bounds.Contains(bot.Body.transform.position + Vector3.up * 0.5f))
+                continue;
+            if (TryJoinElevator(bot, out _))
+                return true;
+        }
+        return false;
     }
 
     internal void ReleaseElevator(IBot bot)
@@ -1081,7 +1253,18 @@ internal sealed class Director
         {
             crewDeaths.Add(bot.Body);
             var body = bot is CrewBot crew ? crew.PhysicalBody : null;
+            Board.RecordDeath(bot.Position, bot.Inside, Time.time);
+            if (bot.Inside)
+                foreach (var entrance in entrances)
+                    if (entrance != null && !entrance.isEntranceToBuilding && entrance.entrancePoint != null &&
+                        (entrance.entrancePoint.position - bot.Position).sqrMagnitude <= 100f)
+                        MarkUnsafeEntrance(entrance.entranceId, Time.time);
             history.Record(bot, "death", body != null && body.Dead ? $"cause={body.DeathCause} attacker={body.DeathAttacker} body={body.SpawnBody}" : "cause=unknown attacker=unknown");
+            if (guardian != null && guardian.Available && guardian.Aboard && HUDManager.Instance != null)
+            {
+                string cause = body != null && body.Dead ? $"{body.DeathCause}, {body.DeathAttacker}" : "unknown cause";
+                HUDManager.Instance.AddTextToChatOnServer($"{guardian.Body.playerUsername}: {bot.Body.playerUsername} died ({cause}); marking the area dangerous.");
+            }
             Outcome(bot, -1f);
         }
         if (guardian == bot)
@@ -1151,6 +1334,12 @@ internal sealed class Director
                 charger = UnityEngine.Object.FindObjectOfType<ItemCharger>();
             if (shipTerminal == null)
                 shipTerminal = UnityEngine.Object.FindObjectOfType<Terminal>();
+            if (Elevator == null)
+                Elevator = UnityEngine.Object.FindObjectOfType<MineshaftElevatorController>();
+            if (dropship == null)
+                dropship = UnityEngine.Object.FindObjectOfType<ItemDropship>();
+            if (insideNodes.Count == 0)
+                ReadNodes("AINode", insideNodes);
             foreach (var entrance in UnityEngine.Object.FindObjectsOfType<EntranceTeleport>())
             {
                 if (entrance != null && entrance.entrancePoint != null && !entrances.Contains(entrance))
@@ -1235,7 +1424,7 @@ internal sealed class Director
         }
         foreach (var bot in bots)
             PlanEscape(bot, now);
-        scrap = Board.ScavengableItems();
+        scrap = Board.ScavengableItems(bots);
         RefreshEntranceBatches();
         if (now >= nextSave)
         {
@@ -1265,6 +1454,7 @@ internal sealed class Director
 
         GuardShip(now);
         AssignPeeperRescue(now);
+        AssignEquipmentHandoffs(now);
         IBot? shipOperator = facilityCrewPresent && guardian != null && guardian.Available && guardian.Aboard ? guardian : null;
         if (shipOperator != null && shipOperator.Order.Kind == TaskKind.AssistPeeper)
             shipOperator = null;
@@ -1272,16 +1462,32 @@ internal sealed class Director
         {
             foreach (var bot in available)
             {
-                if (bot.Aboard && bot.Cargo == null &&
-                    (bot.Order.Kind == TaskKind.Hold || bot.Order.Kind == TaskKind.Guard || bot.Order.Kind == TaskKind.Return || bot.Order.Kind == TaskKind.ShipControl))
+                if (bot.Aboard && bot.Cargo == null && bot.Order.Kind != TaskKind.AssistPeeper &&
+                    bot.Order.Kind != TaskKind.EquipWeapon && bot.Order.Kind != TaskKind.CareBaby && !assigned.Contains(bot))
                 {
-                    shipOperator = bot;
-                    break;
+                    if (shipOperator == null || bot.Body.health < shipOperator.Body.health)
+                        shipOperator = bot;
                 }
             }
         }
         if (BotSettings.ShipSupport)
+        {
+            doorOperator = null;
             OperateShipDoor(now);
+            if (shipOperator == doorOperator)
+                shipOperator = null;
+            IBot? lightsOperator = shipOperator;
+            if (lightsOperator == null)
+                foreach (var bot in available)
+                    if (bot.Aboard && bot.Cargo == null && bot != doorOperator &&
+                        bot.Order.Kind != TaskKind.AssistPeeper && RoleOf(bot) == BotRole.ShipSupport)
+                    {
+                        lightsOperator = bot;
+                        break;
+                    }
+            if (lightsOperator != null && RestoreShipLights(lightsOperator, now) && shipOperator == lightsOperator)
+                shipOperator = null;
+        }
         if (facilityCrewPresent && BotSettings.ShipSupport && teleporter != null && teleporter.isActiveAndEnabled &&
             shipOperator == null && HasExitRescueRequest(now))
         {
@@ -1319,11 +1525,11 @@ internal sealed class Director
                 rescueTarget = null;
             if (!terminalInUse && rescueTarget == null && shipTerminal != null)
             {
-                var trigger = TerminalTrigger(shipTerminal);
+                var trigger = TerminalTrigger(shipTerminal) ?? shipTerminal.GetComponent<InteractTrigger>();
                 if (trigger != null)
                 {
                     Vector3 terminalPoint = trigger.playerPositionNode != null ? trigger.playerPositionNode.position : trigger.transform.position;
-                    if (ApproachShipControl(shipOperator, terminalPoint))
+                    if (ApproachTerminal(shipOperator, terminalPoint))
                     {
                         shipControlUntil = now + 1.5f;
                         Assign(shipOperator, new Order(TaskKind.ShipControl, shipOperator.Position));
@@ -1331,7 +1537,7 @@ internal sealed class Director
                     }
                 }
             }
-            if (!terminalInUse && rescueTarget == null && round.mapScreen != null && now >= nextRadarSwitch)
+            if (terminalReady && rescueTarget == null && round.mapScreen != null && now >= nextRadarSwitch)
             {
                 nextRadarSwitch = now + 15f;
                 if (round.mapScreen.currentCameraDisabled)
@@ -1365,9 +1571,23 @@ internal sealed class Director
                 }
             }
         }
+        var terminalTrigger = shipTerminal != null ? TerminalTrigger(shipTerminal) ?? shipTerminal.GetComponent<InteractTrigger>() : null;
         foreach (var bot in bots)
             if (bot is CrewBot crew)
-                crew.SetTerminalUsing(terminalReady && bot == shipOperator, shipTerminal != null ? shipTerminal.transform.position : ship);
+                crew.SetTerminalUsing(terminalReady && bot == shipOperator,
+                    terminalTrigger != null ? terminalTrigger.transform.position : ship,
+                    terminalTrigger != null && terminalTrigger.playerPositionNode != null ? terminalTrigger.playerPositionNode.rotation : null);
+        if (EarlyDepartureVote)
+        {
+            foreach (var bot in available)
+            {
+                if (bot.ElevatorTransit || bot.Aboard && bot.Order.Kind == TaskKind.ShipControl)
+                    continue;
+                Assign(bot, new Order(bot.Cargo != null ? TaskKind.Transport : TaskKind.Return, ship));
+            }
+            return;
+        }
+        AssignDropshipDelivery(now);
         float secondsLeft = SecondsUntilDeparture();
         if (secondsLeft <= 180f)
             foreach (var bot in available)
@@ -1394,6 +1614,10 @@ internal sealed class Director
                 !CanCalmSlime(bot, contact, now) && Blackboard.MustFlee(contact, bot.Body) && ((bot.Position - contact.Sample.Position).sqrMagnitude < 81f || contact.Sample.Pursuing == bot.Body))
             {
                 Assign(bot, new Order(TaskKind.Evade, Vector3.zero, bot.Inside));
+            }
+            else if (BotSettings.ShipSupport && RoleOf(bot) == BotRole.ShipSupport)
+            {
+                Assign(bot, new Order(bot.Cargo != null ? TaskKind.Transport : TaskKind.Guard, ship));
             }
             else if (TryRecoverNoisyLoot(bot, now, out var recoverable))
                 Assign(bot, new Order(TaskKind.Scavenge, recoverable.transform.position, bot.Inside, recoverable));
@@ -1593,6 +1817,72 @@ internal sealed class Director
         }
     }
 
+    private void AssignDropshipDelivery(float now)
+    {
+        foreach (var item in DeliveryRegistry.Items)
+        {
+            if (item == null || !item.IsSpawned || !item.isHeld || item.playerHeldBy == null)
+                continue;
+            foreach (var bot in available)
+            {
+                if (bot.Body != item.playerHeldBy || bot.ElevatorTransit || bot.Inside)
+                    continue;
+                Assign(bot, new Order(TaskKind.DeliverDelivery, ship, false, item));
+                return;
+            }
+        }
+        if (!BotSettings.CollectDeliveries || dropship == null)
+            return;
+
+        GrabbableObject? selectedItem = null;
+        IBot? selectedBot = null;
+        float best = float.PositiveInfinity;
+        foreach (var item in DeliveryRegistry.Items)
+        {
+            if (item == null || !item.IsSpawned || !item.isActiveAndEnabled || !item.grabbable || item.itemProperties == null ||
+                item.isHeld || item.heldByPlayerOnServer || item.isHeldByEnemy || item.isInShipRoom || LightningHazard.IsTarget(item))
+                continue;
+            foreach (var bot in available)
+            {
+                if (assigned.Contains(bot) || bot.Inside || bot.Cargo != null || !BotBody.TryGet(bot.Body, out var carrier) ||
+                    !carrier.CanCarryAfterPocket(item))
+                    continue;
+                float distance = (bot.Position - item.transform.position).sqrMagnitude;
+                if (!DeliveryPolicy.PreferDistance(distance, best) || Board.Risk(item.transform.position, false, now) >= 0.38f ||
+                    !bot.CanAttempt(item.transform.position, false, now) || !bot.CanReach(item.transform.position, false))
+                    continue;
+                selectedBot = bot;
+                selectedItem = item;
+                best = distance;
+            }
+        }
+        if (selectedBot != null && selectedItem != null)
+        {
+            Assign(selectedBot, new Order(TaskKind.CollectDelivery, selectedItem.transform.position, false, selectedItem));
+            return;
+        }
+        if (!DeliveryPolicy.ShouldOpen(BotSettings.CollectDeliveries, dropship.shipLanded, dropship.shipDoorsOpened,
+            DropshipOrders(dropship).Count) || dropship.triggerScript == null)
+            return;
+        Vector3 target = dropship.triggerScript.transform.position;
+        if (!NavMesh.SamplePosition(target, out var approach, 3f, NavMesh.AllAreas))
+            return;
+        foreach (var bot in available)
+        {
+            if (assigned.Contains(bot) || bot.Inside || bot.Cargo != null || !BotBody.TryGet(bot.Body, out var carrier) ||
+                carrier.FreeScrapSlots() <= 0 && bot.Body.ItemOnlySlot != null)
+                continue;
+            float distance = (bot.Position - approach.position).sqrMagnitude;
+            if (!DeliveryPolicy.PreferDistance(distance, best) || Board.Risk(approach.position, false, now) >= 0.38f ||
+                !bot.CanAttempt(approach.position, false, now) || !bot.CanReach(approach.position, false))
+                continue;
+            selectedBot = bot;
+            best = distance;
+        }
+        if (selectedBot != null)
+            Assign(selectedBot, new Order(TaskKind.OpenDelivery, approach.position));
+    }
+
     private void OperateShipDoor(float now)
     {
         if (hangarDoor == null || !hangarDoor.isActiveAndEnabled || round.shipIsLeaving || !round.shipHasLanded)
@@ -1618,9 +1908,9 @@ internal sealed class Director
                     (player.transform.position - hangarDoor.triggerScript.transform.position).sqrMagnitude < 4f)
                     return;
         if (automaticDoorClosed && round.hangarDoorsClosed &&
-            TeamDecisionPolicy.ShouldOpenDoor(threat, now - lastDoorThreat, hangarDoor.doorPower))
+            (EarlyDepartureVote || TeamDecisionPolicy.ShouldOpenDoor(threat, now - lastDoorThreat, hangarDoor.doorPower)))
         {
-            if (hangarDoor.triggerScript == null || !ApproachShipControl(operatorBot, hangarDoor.triggerScript.transform.position))
+            if (!PrepareShipDoor(operatorBot, doorPoint, now))
                 return;
             round.SetShipDoorsClosed(false);
             round.SetDoorsClosedServerRpc(false);
@@ -1629,7 +1919,7 @@ internal sealed class Director
             history.Record(operatorBot, "ship_door", "opened");
             return;
         }
-        if (round.hangarDoorsClosed ||
+        if (EarlyDepartureVote || round.hangarDoorsClosed ||
             hangarDoor.triggerScript == null || !hangarDoor.triggerScript.interactable)
             return;
         bool crewNearDoor = false;
@@ -1645,13 +1935,69 @@ internal sealed class Director
         }
         if (!TeamDecisionPolicy.ShouldCloseDoor(threat, crewNearDoor, hangarDoor.overheated, hangarDoor.doorPower))
             return;
-        if (!ApproachShipControl(operatorBot, hangarDoor.triggerScript.transform.position))
+        if (!PrepareShipDoor(operatorBot, doorPoint, now))
             return;
         round.SetShipDoorsClosed(true);
         round.SetDoorsClosedServerRpc(true);
         automaticDoorClosed = true;
         nextDoorAction = now + 3f;
         history.Record(operatorBot, "ship_door", "closed_nearby_threat");
+    }
+
+    private bool PrepareShipDoor(IBot bot, Vector3 doorPoint, float now)
+    {
+        if (hangarDoor == null || hangarDoor.triggerScript == null)
+            return false;
+        doorOperator = bot;
+        if (!ApproachShipControl(bot, hangarDoor.triggerScript.transform.position))
+            return false;
+        shipControlUntil = now + 1.5f;
+        Assign(bot, new Order(TaskKind.ShipControl, bot.Position));
+        return !(bot is CrewBot crew) || crew.FaceShipDoor(doorPoint, now);
+    }
+
+    private bool RestoreShipLights(IBot bot, float now)
+    {
+        var lights = round.shipRoomLights;
+        if (lights == null || lights.areLightsOn || now < nextLightsAction || round.shipIsLeaving)
+            return false;
+        if (lightsSwitch == null && now >= nextLightsSearch)
+        {
+            nextLightsSearch = now + 10f;
+            foreach (var trigger in UnityEngine.Object.FindObjectsOfType<InteractTrigger>())
+            {
+                if (trigger == null || !round.shipBounds.bounds.Contains(trigger.transform.position))
+                    continue;
+                if (ControlsShipLights(trigger.onInteract, lights) || ControlsShipLights(trigger.onInteractEarly, lights))
+                    lightsSwitch = trigger;
+                if (lightsSwitch != null)
+                    break;
+            }
+        }
+        if (lightsSwitch == null || !lightsSwitch.interactable)
+            return false;
+        if (!ApproachShipControl(bot, lightsSwitch.transform.position))
+            return true;
+        Assign(bot, new Order(TaskKind.ShipControl, bot.Position));
+        shipControlUntil = now + 1.5f;
+        lights.SetShipLightsBoolean(true);
+        nextLightsAction = now + 5f;
+        Record(bot, "ship_lights", "turned_on");
+        return true;
+    }
+
+    private static bool ControlsShipLights(InteractEvent interaction, ShipLights lights)
+    {
+        if (interaction == null)
+            return false;
+        for (int index = 0; index < interaction.GetPersistentEventCount(); index++)
+        {
+            string method = interaction.GetPersistentMethodName(index);
+            if (interaction.GetPersistentTarget(index) == lights &&
+                (method == "ToggleShipLights" || method == "SetShipLightsBoolean"))
+                return true;
+        }
+        return false;
     }
 
     private bool HasExitRescueRequest(float now)
@@ -1665,6 +2011,8 @@ internal sealed class Director
 
     private bool NeedsRescue(GameNetcodeStuff.PlayerControllerB player, float now)
     {
+        if (player != null && recentTeleports.TryGetValue(player, out float lastTeleport) && now - lastTeleport < 30f)
+            return false;
         if (RecoverableBody(player))
             return true;
         if (player == null || !player.isPlayerControlled || player.isPlayerDead || !player.isInsideFactory ||
@@ -1709,6 +2057,20 @@ internal sealed class Director
             shipControlUntil = Time.time + 1.5f;
             Assign(bot, new Order(TaskKind.ShipControl, point.position));
         }
+        return false;
+    }
+
+    private bool ApproachTerminal(IBot bot, Vector3 position)
+    {
+        if (!NavMesh.SamplePosition(position, out var point, 2f, NavMesh.AllAreas) ||
+            !round.shipInnerRoomBounds.bounds.Contains(point.position + Vector3.up * 0.45f))
+            return false;
+        Vector3 offset = point.position - bot.Position;
+        offset.y = 0f;
+        if (offset.sqrMagnitude <= 0.64f)
+            return true;
+        shipControlUntil = Time.time + 1.5f;
+        Assign(bot, new Order(TaskKind.ShipControl, point.position));
         return false;
     }
 
@@ -1764,6 +2126,7 @@ internal sealed class Director
                     return;
                 }
                 Plugin.Log.LogInfo($"Ship operator is teleporting endangered player {rescueTarget.playerClientId}.");
+                recentTeleports[rescueTarget] = now;
                 teleporter.PressTeleportButtonOnLocalClient();
                 rescueTarget = null;
                 nextRadarSwitch = now + 5f;
@@ -1784,8 +2147,22 @@ internal sealed class Director
         if (!BotSettings.RecoverBodies || player == null || !player.isPlayerDead || player.deadBody == null)
             return false;
         var body = player.deadBody;
-        return !body.deactivated && !body.isInShip && !body.parentedToShip && body.gameObject.activeInHierarchy &&
-            (body.grabBodyObject == null || !body.grabBodyObject.isHeld && !body.grabBodyObject.heldByPlayerOnServer);
+        if (body.deactivated || body.isInShip || body.parentedToShip || !body.gameObject.activeInHierarchy ||
+            body.grabBodyObject != null && (body.grabBodyObject.isHeld || body.grabBodyObject.heldByPlayerOnServer || body.grabBodyObject.isInShipRoom))
+            return false;
+        var round = StartOfRound.Instance;
+        if (round != null && round.shipBounds != null)
+        {
+            var bounds = round.shipBounds.bounds;
+            if (bounds.Contains(body.transform.position) || body.radarDot != null && bounds.Contains(body.radarDot.position) ||
+                body.grabBodyObject != null && bounds.Contains(body.grabBodyObject.transform.position))
+                return false;
+            if (body.bodyParts != null)
+                foreach (var part in body.bodyParts)
+                    if (part != null && bounds.Contains(part.position))
+                        return false;
+        }
+        return true;
     }
 
     internal bool IsLate()
@@ -1873,10 +2250,19 @@ internal sealed class Director
 
     private void GuardShip(float now)
     {
-        if (!Board.OutdoorThreat || HumanAboard())
+        if (!BotSettings.ShipSupport || !Board.OutdoorThreat || HumanAboard())
         {
             guardian = null;
             return;
+        }
+
+        foreach (var bot in available)
+        {
+            if (bot.Aboard && bot.CanGuard && RoleOf(bot) == BotRole.ShipSupport)
+            {
+                guardian = bot;
+                break;
+            }
         }
 
         if (guardian == null || !guardian.Available || !guardian.CanGuard || !guardian.Aboard)
@@ -1971,14 +2357,14 @@ internal sealed class Director
             immediateThreat, Board.Risk(bot.Position, bot.Inside, now, false));
         var current = bot.Order;
         BotRole role = RoleOf(bot);
-        if (role == BotRole.ShipSupport && facilityCrewPresent)
+        if (role == BotRole.ShipSupport && BotSettings.ShipSupport)
         {
             Assign(bot, new Order(bot.Aboard ? TaskKind.Guard : TaskKind.Return, ship));
             return;
         }
         if (role == BotRole.ShipSupport)
             role = BotRole.Hauler;
-        if (bot.Aboard && bot.Cargo == null && bot.Body.ItemOnlySlot == null &&
+        if (bot.Aboard && bot.Cargo == null && bot.Body.ItemOnlySlot == null && Board.IndoorEnemyKnown(now) &&
             BotBody.TryGet(bot.Body, out var utilityCarrier))
         {
             GrabbableObject? utility = null;
@@ -2071,7 +2457,7 @@ internal sealed class Director
                 return;
             }
         }
-        if (bot.Aboard && bot.Body.currentlyHeldObjectServer == null)
+        if (bot.Aboard && bot.Body.currentlyHeldObjectServer == null && Board.IndoorEnemyKnown(now))
         {
             foreach (var weapon in Blackboard.Items)
             {
@@ -2174,7 +2560,7 @@ internal sealed class Director
                 !IsEntranceBatchItem(item))
                 continue;
 
-            Vector3 position = item.transform.position;
+            Vector3 position = Board.KnownLootPosition(item);
             if (!bot.CanAttempt(position, item.isInFactory, now))
                 continue;
             if (Board.Coordinated && partner == null && !canExplore && (item.isInFactory || Board.Risk(position, false, now) > 0.18f))
@@ -2191,8 +2577,9 @@ internal sealed class Director
             if (item.isInFactory && !bot.Inside || item.isInFactory == bot.Inside && !bot.CanReach(position, bot.Inside))
                 continue;
 
+            float deliveryDistance = item.isInFactory ? IndoorDeliveryDistance(position) : Vector3.Distance(position, ship);
             float score = LootPolicy.Score(bodyRecovery ? 80 : item.scrapValue, item.itemProperties.weight,
-                distance + (bodyRecovery && !item.isInFactory ? Vector3.Distance(position, ship) * 0.5f : 0f),
+                distance + deliveryDistance * 0.35f,
                 pressure, item.itemProperties.twoHanded, lootCarrier.FreeScrapSlots(), bodyRecovery ? 0f : quotaGap, quotaUrgency) - risk * (bodyRecovery ? 5f : 2f) + learning.Estimate("task:Scavenge") * 0.5f +
                 learning.Estimate("task:Transport") * 0.35f + learning.Estimate(item.isInFactory ? "route:inside" : "route:outside") * 0.4f;
             if (!item.isInFactory)
@@ -2208,13 +2595,19 @@ internal sealed class Director
             (bestItem.transform.position - bot.Position).sqrMagnitude < 144f ||
             bestScore >= explorationScrapThreshold + learning.Estimate("task:Explore") * 0.4f))
         {
-            AssignTeam(bot, new Order(TaskKind.Scavenge, bestItem.transform.position, bestItem.isInFactory, bestItem, partner), partner);
+            AssignTeam(bot, new Order(TaskKind.Scavenge, Board.KnownLootPosition(bestItem), bestItem.isInFactory, bestItem, partner), partner);
             return;
         }
 
         if (seekingEntrance && bot.CanEnterFacility(now) && TryApproachEntrance(bot, now, out var entranceApproach))
         {
             AssignTeam(bot, new Order(TaskKind.Explore, entranceApproach, false, partner: partner), partner);
+            return;
+        }
+
+        if (canExplore && !immediateThreat && bot.Inside && bot.Cargo == null && TryMineshaftDescent(bot, partner, now, out var lowerTarget))
+        {
+            AssignTeam(bot, new Order(TaskKind.Explore, lowerTarget, true, partner: partner), partner);
             return;
         }
 
@@ -2226,7 +2619,7 @@ internal sealed class Director
 
         if (bestItem != null)
         {
-            AssignTeam(bot, new Order(TaskKind.Scavenge, bestItem.transform.position, bestItem.isInFactory, bestItem, partner), partner);
+            AssignTeam(bot, new Order(TaskKind.Scavenge, Board.KnownLootPosition(bestItem), bestItem.isInFactory, bestItem, partner), partner);
             return;
         }
 
@@ -2285,6 +2678,23 @@ internal sealed class Director
             roles.Remove(bot);
 
         BotRolePolicy.Targets(available.Count, out int targetExplorers, out int targetHaulers, out int targetSupport);
+        if (targetSupport > 0 && BotSettings.ShipSupport)
+        {
+            IBot? preferred = null;
+            foreach (var bot in available)
+            {
+                bool current = roles.TryGetValue(bot, out var existing) && existing == BotRole.ShipSupport;
+                bool previousCurrent = preferred != null && roles.TryGetValue(preferred, out var previous) && previous == BotRole.ShipSupport;
+                if (preferred == null || BotRolePolicy.PreferSupport(bot.Body.health, current, bot.Aboard,
+                    preferred.Body.health, previousCurrent, preferred.Aboard))
+                    preferred = bot;
+            }
+            foreach (var bot in available)
+                if (bot != preferred && roles.TryGetValue(bot, out var existing) && existing == BotRole.ShipSupport)
+                    roles.Remove(bot);
+            if (preferred != null)
+                roles[preferred] = BotRole.ShipSupport;
+        }
         int explorerCount = 0;
         int haulerCount = 0;
         int supportCount = 0;
@@ -2359,6 +2769,13 @@ internal sealed class Director
         return roles.TryGetValue(bot, out var role) ? role : BotRole.Explorer;
     }
 
+    internal bool IsShipOperator(IBot bot)
+    {
+        return bot == guardian || bot == doorOperator || bot == departureBot ||
+            bot.Order.Kind == TaskKind.Guard || bot.Order.Kind == TaskKind.ShipControl ||
+            BotSettings.ShipSupport && RoleOf(bot) == BotRole.ShipSupport;
+    }
+
     private bool TryExplore(IBot bot, float now, out Vector3 point, out bool inside)
     {
         inside = bot.Inside;
@@ -2409,6 +2826,64 @@ internal sealed class Director
         }
 
         return !float.IsNegativeInfinity(best);
+    }
+
+    private bool TryMineshaftDescent(IBot bot, IBot? partner, float now, out Vector3 point)
+    {
+        point = default;
+        var lift = Elevator;
+        if (lift == null || lift.elevatorTopPoint == null || lift.elevatorBottomPoint == null ||
+            (bot.Position - lift.elevatorTopPoint.position).sqrMagnitude > 400f ||
+            !DifferentElevatorFloors(bot.Position, lift.elevatorBottomPoint.position))
+            return false;
+
+        Vector3 landing = lift.elevatorBottomPointDoor != null ? lift.elevatorBottomPointDoor.position : lift.elevatorBottomPoint.position;
+        float bestScore = float.PositiveInfinity;
+        bool hasLowerNode = false;
+        foreach (var node in insideNodes)
+        {
+            if (!DifferentElevatorFloors(bot.Position, node) || Mathf.Abs(node.y - landing.y) > 8f)
+                continue;
+            if ((node - landing).sqrMagnitude > bestScore + 16f)
+                continue;
+            if (!NavMesh.SamplePosition(node, out var nodeHit, 1.5f, NavMesh.AllAreas) ||
+                Mathf.Abs(nodeHit.position.y - node.y) > 1.5f || !DifferentElevatorFloors(bot.Position, nodeHit.position))
+                continue;
+            hasLowerNode = true;
+            float distance = (nodeHit.position - landing).sqrMagnitude;
+            if (distance >= bestScore || WasVisited(nodeHit.position) || !bot.CanAttempt(nodeHit.position, true, now) ||
+                Board.Risk(nodeHit.position, true, now, false) >= 0.38f)
+                continue;
+            bool claimed = false;
+            foreach (var other in explorationOwners)
+                if (other != bot && other != partner && other.Order.Kind == TaskKind.Explore && other.Order.Inside &&
+                    (other.Order.Point - nodeHit.position).sqrMagnitude < 25f)
+                {
+                    claimed = true;
+                    break;
+                }
+            if (claimed)
+                continue;
+            foreach (var other in assigned)
+                if (other != bot && other != partner && other.Order.Kind == TaskKind.Explore && other.Order.Inside &&
+                    (other.Order.Point - nodeHit.position).sqrMagnitude < 25f)
+                {
+                    claimed = true;
+                    break;
+                }
+            if (claimed)
+                continue;
+            bestScore = distance;
+            point = nodeHit.position;
+        }
+        if (!float.IsPositiveInfinity(bestScore))
+            return true;
+        if (hasLowerNode || !NavMesh.SamplePosition(landing, out var hit, 4f, NavMesh.AllAreas) ||
+            !DifferentElevatorFloors(bot.Position, hit.position) || !bot.CanAttempt(hit.position, true, now) ||
+            Board.Risk(hit.position, true, now, false) >= 0.38f)
+            return false;
+        point = hit.position;
+        return true;
     }
 
     private bool TryRandomWander(IBot bot, float now, out Vector3 point)
@@ -2776,6 +3251,81 @@ internal sealed class Director
         return true;
     }
 
+    internal bool CanTakeSharedEquipment(IBot bot, GrabbableObject item, float now)
+    {
+        return !equipmentHandoffs.TryGetValue(item, out var handoff) || handoff.Until <= now || handoff.Receiver == bot;
+    }
+
+    private void AssignEquipmentHandoffs(float now)
+    {
+        expiredHandoffs.Clear();
+        foreach (var entry in equipmentHandoffs)
+        {
+            var item = entry.Key;
+            var recipient = entry.Value.Receiver;
+            if (item == null || !item.IsSpawned || item.isHeld || item.heldByPlayerOnServer || !recipient.Available ||
+                entry.Value.Until <= now || (recipient.Position - item.transform.position).sqrMagnitude > 36f)
+            {
+                expiredHandoffs.Add(item!);
+                continue;
+            }
+            if (!assigned.Contains(recipient) && Board.Risk(recipient.Position, recipient.Inside, now, false) < 0.35f)
+                Assign(recipient, new Order(TaskKind.EquipWeapon, item.transform.position, recipient.Inside, item));
+        }
+        foreach (var item in expiredHandoffs)
+            equipmentHandoffs.Remove(item);
+
+        foreach (var recipient in available)
+        {
+            if (!recipient.Inside || assigned.Contains(recipient) || !BotBody.TryGet(recipient.Body, out var receiver) ||
+                Board.Risk(recipient.Position, true, now, false) >= 0.25f)
+                continue;
+            bool needsKey = receiver.FindItem<KeyItem>() == null && LockedDoorNear(recipient.Position) != null;
+            bool needsWeapon = receiver.FindItem<Shovel>() == null && Board.IndoorEnemyKnown(now);
+            if (!needsKey && !needsWeapon)
+                continue;
+            foreach (var donor in available)
+            {
+                if (donor == recipient || !donor.Inside || donor.ElevatorTransit ||
+                    (donor.Position - recipient.Position).sqrMagnitude > 4f ||
+                    !BotBody.TryGet(donor.Body, out var donorBody) || Board.Risk(donor.Position, true, now, false) >= 0.25f)
+                    continue;
+                GrabbableObject? item = needsKey ? donorBody.FindItem<KeyItem>() : null;
+                if (item == null && needsWeapon)
+                {
+                    int count = donor.Body.ItemOnlySlot is Shovel ? 1 : 0;
+                    foreach (var held in donor.Body.ItemSlots)
+                        if (held is Shovel)
+                            count++;
+                    if (count > 1)
+                        item = donorBody.FindItem<Shovel>();
+                }
+                if (item == null || LightningHazard.IsTarget(item) || !receiver.CanCarryAfterPocket(item) || !donorBody.DropItem(item))
+                    continue;
+                equipmentHandoffs[item] = (recipient, now + 10f);
+                Assign(recipient, new Order(TaskKind.EquipWeapon, item.transform.position, true, item));
+                history.Record(donor, "equipment_handoff", $"item={item.name} recipient={recipient.Body.playerUsername}");
+                break;
+            }
+        }
+    }
+
+    private float IndoorDeliveryDistance(Vector3 position)
+    {
+        float best = float.PositiveInfinity;
+        foreach (var entrance in entrances)
+        {
+            if (entrance == null || entrance.isEntranceToBuilding || entrance.entrancePoint == null ||
+                entrance.exitScript == null || entrance.exitScript.entrancePoint == null)
+                continue;
+            float distance = Vector3.Distance(position, entrance.entrancePoint.position) +
+                Vector3.Distance(entrance.exitScript.entrancePoint.position, ship);
+            if (distance < best)
+                best = distance;
+        }
+        return float.IsPositiveInfinity(best) ? 24f : best;
+    }
+
     private bool IsAvailable(GrabbableObject? item)
     {
         return item != null && NoisyLootReady(item, Time.time) && !Blackboard.HoarderNearItem(item) && item.isActiveAndEnabled && item.IsSpawned && item.itemProperties != null && (item is RagdollGrabbableObject body && body.ragdoll != null && BotSettings.RecoverBodies ||
@@ -2785,7 +3335,7 @@ internal sealed class Director
     private void AssignTeam(IBot leader, Order order, IBot? partner)
     {
         Assign(leader, order);
-        if (partner != null && leader.Inside && partner.Inside)
+        if (Board.Coordinated && partner != null && leader.Inside && partner.Inside)
             Assign(partner, new Order(TaskKind.Escort, Vector3.zero, true, partner: leader));
     }
 
@@ -2807,6 +3357,9 @@ internal sealed class Director
 
     internal void Dispose()
     {
+        foreach (var link in jumpLinks)
+            if (link.valid)
+                link.Remove();
         foreach (var pair in doorObstacles)
         {
             if (pair.Key != null && pair.Value.Obstacle != null && !pair.Key.isLocked)

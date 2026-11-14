@@ -25,12 +25,24 @@ internal sealed class CrewBot : IDisposable, IBot
     private readonly Collider[] nearbyInteractions = new Collider[64];
     private readonly Collider shipRoom;
     private readonly float speed;
-    private readonly float aimSpeed = UnityEngine.Random.Range(100f, 220f);
+    private readonly float aimSpeed = UnityEngine.Random.Range(200f, 440f);
+    internal ulong AvatarSteamId { get; }
     private Order order;
     private float assignedAt;
     private float enteredAt;
     private float nextMechanics;
     private float nextRoute;
+    private bool jumping;
+    private Vector3 jumpStart;
+    private Vector3 jumpEnd;
+    private float jumpStarted;
+    private float jumpDuration;
+    private float nextJumpSearch;
+    private bool bridgeFalling;
+    private bool waitingForBridge;
+    private float bridgeFallVelocity;
+    private float bridgeFallStartHeight;
+    private float bridgeFallStarted;
     private SandWormAI? threateningWorm;
     private Vector3 wormEruptionPoint;
     private float nextWormCheck;
@@ -45,6 +57,9 @@ internal sealed class CrewBot : IDisposable, IBot
     private float lastProgress;
     private float blockedUntil;
     private float nextKeySearch;
+    private float nextValveSearch;
+    private float valveDeadline;
+    private SteamValveHazard? targetValve;
     private float nextExtraPickup;
     private float nextVisit;
     private float lastPortalTime = -100f;
@@ -61,7 +76,15 @@ internal sealed class CrewBot : IDisposable, IBot
     private DoorLock? pendingLockedDoor;
     private bool routed;
     private bool disposed;
+    private bool departingWithShip;
+    private Vector3 shipLocalPosition;
+    private Quaternion shipLocalRotation;
+    private Vector3 shipLocalLook;
     private float nextLook;
+    private float aimYawVelocity;
+    private float doorLookUntil;
+    private float doorFacingDeadline;
+    private Quaternion terminalFacing;
     private Vector3 lookPoint;
     private bool frozen;
     private bool crouching;
@@ -84,6 +107,9 @@ internal sealed class CrewBot : IDisposable, IBot
     private Vector3 liftProgressPosition;
     private Vector3 liftOffset;
     private Vector3 liftApproach;
+    private Vector3 liftExitPosition;
+    private bool liftBoardingOnNavMesh;
+    private float liftBoardedAt;
     private readonly System.Collections.Generic.Dictionary<(Vector3Int Cell, bool Inside), float> failedTargets = new System.Collections.Generic.Dictionary<(Vector3Int, bool), float>();
     private float pendingDoorSince;
     private Vector3 lastExtractionPosition;
@@ -104,6 +130,14 @@ internal sealed class CrewBot : IDisposable, IBot
     private Shovel? swingWeapon;
     private float releaseSwingAt;
     private float nextSwing;
+    private float nextShipEmote;
+    private float shipEmoteUntil;
+    private byte shipEmote;
+    private string shipCustomEmote = string.Empty;
+    private bool wasEmoteEligible;
+    private EnemyAI? meleeAimTarget;
+    private Collider? meleeAimCollider;
+    private float meleeAimUntil;
     private float sprintMultiplier = 1f;
     private float chargeReadyAt;
     private GrabbableObject? chargingItem;
@@ -129,6 +163,7 @@ internal sealed class CrewBot : IDisposable, IBot
     private float nextEscapeDrop;
     private float nextAmmoAction;
     private float nextEquipmentSearch;
+    private float nextDeliveryOpen;
     private float nextBabyRock;
     private SpikeRoofTrap? avoidedSpike;
     private float spikeAvoidUntil;
@@ -177,8 +212,10 @@ internal sealed class CrewBot : IDisposable, IBot
         agent.obstacleAvoidanceType = ObstacleAvoidanceType.HighQualityObstacleAvoidance;
         agent.avoidancePriority = 10 + (int)(player.playerClientId % 80);
         agent.stoppingDistance = 0.45f;
-        agent.autoTraverseOffMeshLink = true;
+        agent.autoTraverseOffMeshLink = false;
         body = new BotBody(player);
+        AvatarSteamId = BotSettings.RandomSteamAvatars ? BotAvatars.Choose() : 0UL;
+        BotAvatars.Assign(player, AvatarSteamId);
         body.Pose(agent.transform.position, Quaternion.identity, false, false, Aboard);
         director.Add(this);
     }
@@ -186,10 +223,37 @@ internal sealed class CrewBot : IDisposable, IBot
     public PlayerControllerB Body => body.Player;
     public Vector3 Position => agent.transform.position;
     public bool Aboard => !Inside && shipRoom != null && shipRoom.bounds.Contains(Position + Vector3.up * 0.45f);
+    internal bool DepartingWithShip => departingWithShip;
     public bool Inside => Body != null && Body.isInsideFactory;
     public bool Available => !disposed && Body != null && Body.IsOwnedByServer && !body.Dead && !Body.isPlayerDead && Body.isPlayerControlled;
+
+    internal void BeginShipDeparture(Transform shipTransform)
+    {
+        if (!Available || Inside || !Aboard && !Body.isInHangarShipRoom)
+            return;
+        SetShipEmote(0, string.Empty);
+        departingWithShip = true;
+        shipLocalPosition = shipTransform.InverseTransformPoint(Position);
+        shipLocalRotation = Quaternion.Inverse(shipTransform.rotation) * Body.transform.rotation;
+        shipLocalLook = shipTransform.InverseTransformPoint(lookPoint);
+        if (agent.enabled)
+            agent.enabled = false;
+    }
+
+    internal void FollowDepartingShip(Transform shipTransform)
+    {
+        if (!departingWithShip || !Available)
+            return;
+        Vector3 position = shipTransform.TransformPoint(shipLocalPosition);
+        agent.transform.position = position;
+        lookPoint = shipTransform.TransformPoint(shipLocalLook);
+        body.Pose(position, shipTransform.rotation * shipLocalRotation, false, false, true);
+        body.SetLook(lookPoint, aimSpeed);
+    }
     public bool CanGuard => Available && liftPhase == LiftPhase.None && (Aboard || agent.isOnNavMesh && Time.time >= blockedUntil);
     public bool ElevatorTransit => liftPhase != LiftPhase.None;
+    internal bool ElevatorBoarding => liftPhase == LiftPhase.Board || liftPhase == LiftPhase.Ride;
+    internal bool ElevatorGoingDown => liftGoingDown;
     private static bool IsCargo(GrabbableObject? item)
     {
         return item != null && item.IsSpawned && item.isHeld && item.itemProperties != null &&
@@ -230,7 +294,7 @@ internal sealed class CrewBot : IDisposable, IBot
                 return false;
         return true;
     }
-    internal void SetTerminalUsing(bool value, Vector3 terminalPoint)
+    internal void SetTerminalUsing(bool value, Vector3 terminalPoint, Quaternion? facing = null)
     {
         body.SetTerminalPose(value);
         if (value)
@@ -238,9 +302,32 @@ internal sealed class CrewBot : IDisposable, IBot
             scanning = false;
             lookPoint = terminalPoint + Vector3.up;
             nextLook = Time.time + 1f;
+            if (facing.HasValue)
+                terminalFacing = facing.Value;
+            else
+            {
+                Vector3 direction = terminalPoint - Position;
+                direction.y = 0f;
+                terminalFacing = direction.sqrMagnitude > 0.01f ? Quaternion.LookRotation(direction) : Body.transform.rotation;
+            }
         }
     }
+
+    internal bool FaceShipDoor(Vector3 point, float now)
+    {
+        if (now > doorLookUntil)
+            doorFacingDeadline = now + 1.5f;
+        doorLookUntil = now + 1f;
+        scanning = false;
+        lookPoint = point + Vector3.up;
+        nextLook = now + 1f;
+        Vector3 direction = point - Position;
+        direction.y = 0f;
+        return direction.sqrMagnitude < 0.01f || Vector3.Angle(Body.transform.forward, direction) <= 25f || now >= doorFacingDeadline;
+    }
     internal bool Sprinting => Body.isSprinting;
+    internal bool Jumping => jumping || bridgeFalling;
+    internal byte ShipEmote => shipEmote;
     internal Vector3 LookPoint => lookPoint;
     internal bool Crouching => crouching;
     internal bool Frozen => frozen;
@@ -271,10 +358,14 @@ internal sealed class CrewBot : IDisposable, IBot
             return false;
         if (candidatePath.status == NavMeshPathStatus.PathComplete)
             return true;
-        if (!(Body.currentlyHeldObjectServer is KeyItem) && body.FindItem<LockPicker>() == null)
-            return false;
         int count = candidatePath.GetCornersNonAlloc(corners);
-        return count > 0 && count < corners.Length && director.LockedDoorNear(corners[count - 1]) != null;
+        if (count == 0 || count == corners.Length)
+            return false;
+        if (TryBridgePartialPath(hit.position, corners[count - 1], inside, Time.time) &&
+            agent.CalculatePath(hit.position, candidatePath) && candidatePath.status == NavMeshPathStatus.PathComplete)
+            return true;
+        return (Body.currentlyHeldObjectServer is KeyItem || body.FindItem<LockPicker>() != null) &&
+            director.LockedDoorNear(corners[count - 1]) != null;
     }
 
     public bool TryPortalApproach(Vector3 point, out Vector3 approach)
@@ -315,6 +406,12 @@ internal sealed class CrewBot : IDisposable, IBot
             if (count == 0 || count == corners.Length)
                 continue;
             Vector3 end = corners[count - 1];
+            if (TryBridgePartialPath(hit.position, end, Inside, Time.time) &&
+                agent.CalculatePath(hit.position, candidatePath) && candidatePath.status == NavMeshPathStatus.PathComplete)
+            {
+                approach = hit.position;
+                return true;
+            }
             if ((Body.currentlyHeldObjectServer is KeyItem || body.FindItem<LockPicker>() != null) && director.LockedDoorNear(end) != null)
             {
                 approach = hit.position;
@@ -334,6 +431,39 @@ internal sealed class CrewBot : IDisposable, IBot
         return true;
     }
 
+    private bool TryBridgePartialPath(Vector3 goal, Vector3 edge, bool inside, float now)
+    {
+        if (now < nextJumpSearch || !agent.enabled || !agent.isOnNavMesh)
+            return false;
+        nextJumpSearch = now + 0.75f;
+        Vector3 direction = goal - edge;
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.36f)
+            return false;
+        direction.Normalize();
+
+        if (NavMesh.Raycast(edge, goal, out _, agent.areaMask) &&
+            director.TryJumpLink(agent, edge, goal, inside, now))
+            return true;
+
+        for (int angleIndex = 0; angleIndex < 5; angleIndex++)
+        {
+            float angle = angleIndex == 0 ? 0f : (angleIndex % 2 == 1 ? 1f : -1f) * ((angleIndex + 1) / 2) * 35f;
+            Vector3 ray = Quaternion.Euler(0f, angle, 0f) * direction;
+            for (int step = 1; step <= 4; step++)
+            {
+                Vector3 candidate = edge + ray * step;
+                if (!NavMesh.SamplePosition(candidate, out var landing, 0.75f, agent.areaMask) ||
+                    (landing.position - candidate).sqrMagnitude > 0.56f ||
+                    !NavMesh.Raycast(edge, landing.position, out _, agent.areaMask))
+                    continue;
+                if (director.TryJumpLink(agent, edge, landing.position, inside, now))
+                    return true;
+            }
+        }
+        return false;
+    }
+
     public void Assign(Order next)
     {
         if (Aboard && (next.Kind == TaskKind.Hold || next.Kind == TaskKind.Guard || next.Kind == TaskKind.Return))
@@ -350,6 +480,10 @@ internal sealed class CrewBot : IDisposable, IBot
             routeLearnActive = false;
 
         order = next;
+        if (next.Kind != TaskKind.Hold && next.Kind != TaskKind.Return)
+        {
+            SetShipEmote(0, string.Empty);
+        }
         waypointActive = false;
         laneUsed = false;
         hasPreviousCorner = false;
@@ -457,7 +591,7 @@ internal sealed class CrewBot : IDisposable, IBot
             ResetPath();
             director.RequestReplan();
         }
-        body.EquipStoredWeapon();
+        body.EquipStoredWeapon(visibleThreat != null && visibleThreat.Source is EnemyAI && visibleThreat.Sample.Alive);
         if (pendingPeeperHit != null && now >= peeperHitAt)
         {
             var target = pendingPeeperHit;
@@ -495,6 +629,7 @@ internal sealed class CrewBot : IDisposable, IBot
         var enemy = Body.inAnimationWithEnemy;
         if (enemy != null)
         {
+            SetShipEmote(0, string.Empty);
             if (grabbedBy != enemy)
             {
                 grabbedBy = enemy;
@@ -521,6 +656,39 @@ internal sealed class CrewBot : IDisposable, IBot
             TickElevator(now);
             return;
         }
+        if (bridgeFalling)
+        {
+            TickBridgeFall(now);
+            return;
+        }
+        if ((!agent.enabled || !agent.isOnNavMesh) && shipEmote != 0)
+        {
+            SetShipEmote(0, string.Empty);
+        }
+        bool bridgeCollapsed = false;
+        if (!Inside && !Aboard && agent.enabled &&
+            director.Bridges.Update(this, agent, now, out bridgeCollapsed))
+        {
+            waitingForBridge = true;
+            agent.isStopped = true;
+        }
+        else
+        {
+            if (waitingForBridge && agent.enabled && agent.isOnNavMesh)
+                agent.isStopped = false;
+            waitingForBridge = false;
+            if (bridgeCollapsed)
+            {
+                bridgeFalling = true;
+                bridgeFallVelocity = 0f;
+                bridgeFallStartHeight = Position.y;
+                bridgeFallStarted = now;
+                agent.enabled = false;
+                body.SetJumping(true);
+                TickBridgeFall(now);
+                return;
+            }
+        }
         if (!agent.enabled)
         {
             if (now < blockedUntil || !NavMesh.SamplePosition(Body.transform.position, out var recovery, 2f, agent.areaMask) ||
@@ -544,10 +712,13 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
 
+        if (TickJump(now))
+            return;
+
         bool waitingAtSpike = UpdateSpikeMovement(now);
         CheckExtractionProgress(now);
         CheckIndoorProgress(now);
-        if (!waitingAtSpike && now >= nextMechanics)
+        if (!waitingAtSpike && !waitingForBridge && now >= nextMechanics)
         {
             nextMechanics = now + MechanicsInterval;
             if (!agent.isOnOffMeshLink)
@@ -566,12 +737,25 @@ internal sealed class CrewBot : IDisposable, IBot
         Vector3 velocity = agent.velocity;
         velocity.y = 0f;
         bool walking = velocity.sqrMagnitude > 0.04f;
+        UpdateShipEmote(now, walking);
+        if (now < meleeAimUntil && meleeAimTarget != null && !meleeAimTarget.isEnemyDead &&
+            Body.currentlyHeldObjectServer is Shovel && !frozen &&
+            (visibleThreat == null || !Blackboard.Watch(visibleThreat) && !Blackboard.LookAway(visibleThreat)))
+        {
+            Vector3 aim = MeleeTargetPoint(meleeAimTarget);
+            if (MeleeTargetVisible(meleeAimTarget, aim))
+            {
+                scanning = false;
+                lookPoint = aim;
+                nextLook = now + 0.3f;
+            }
+        }
         if (walking && scanning)
         {
             Vector3 forward = agent.desiredVelocity.sqrMagnitude > 0.1f ? agent.desiredVelocity.normalized : velocity.normalized;
             forward.y = 0f;
             if (forward.sqrMagnitude > 0.01f)
-                lookPoint = Position + Quaternion.Euler(0f, Mathf.Clamp(scanAngle, -45f, 45f), 0f) * forward.normalized * 12f + Vector3.up * scanHeight;
+                lookPoint = Position + Quaternion.Euler(0f, Mathf.Clamp(scanAngle, -60f, 60f), 0f) * forward.normalized * 12f + Vector3.up * scanHeight;
         }
         bool sprinting = walking && !crouching && (threateningWorm != null || now < spikeSprintUntil || order.Kind == TaskKind.Evade || Inside && now < retreatUntil || now < turretEscapeUntil || now < nutcrackerEscapeUntil || !Inside && !Aboard) &&
             StaminaPolicy.CanSprint(Body.sprintMeter, Body.isSprinting && staminaWalking, Body.criticallyInjured,
@@ -586,8 +770,14 @@ internal sealed class CrewBot : IDisposable, IBot
             Vector3 lookDirection = lookPoint - Position;
             lookDirection.y = 0f;
             if (lookDirection.sqrMagnitude > 0.01f)
-                rotation = Quaternion.RotateTowards(Body.transform.rotation, Quaternion.LookRotation(lookDirection), aimSpeed * Time.deltaTime);
+            {
+                float targetYaw = Quaternion.LookRotation(lookDirection).eulerAngles.y;
+                float yaw = Mathf.SmoothDampAngle(Body.transform.eulerAngles.y, targetYaw, ref aimYawVelocity, 0.12f, aimSpeed, Time.deltaTime);
+                rotation = Quaternion.Euler(0f, yaw, 0f);
+            }
         }
+        if (body.TerminalUsing)
+            rotation = Quaternion.RotateTowards(Body.transform.rotation, Quaternion.Euler(0f, terminalFacing.eulerAngles.y, 0f), 360f * Time.deltaTime);
         var lookingThreat = visibleThreat;
         if (!frozen && lookingThreat != null && lookingThreat.Source is SpringManAI && Blackboard.Watch(lookingThreat))
         {
@@ -600,6 +790,137 @@ internal sealed class CrewBot : IDisposable, IBot
         body.SetCrouching(crouching);
         if (!frozen)
             body.SetLook(lookPoint, aimSpeed);
+    }
+
+    private void UpdateShipEmote(float now, bool walking)
+    {
+        bool waiting = (order.Kind == TaskKind.Hold || order.Kind == TaskKind.Return) &&
+            (!agent.hasPath || !agent.pathPending && agent.remainingDistance <= agent.stoppingDistance + 0.2f);
+        bool interacting = body.TerminalUsing || body.LeverUsing || Body.inSpecialInteractAnimation || Body.inAnimationWithEnemy != null;
+        bool idle = ShipEmotePolicy.CanPerform(Aboard, walking, director.IsShipOperator(this), waiting, interacting);
+        if (!idle)
+        {
+            if (wasEmoteEligible || shipEmote != 0)
+                nextShipEmote = now + UnityEngine.Random.Range(3f, 9f);
+            wasEmoteEligible = false;
+            SetShipEmote(0, string.Empty);
+            return;
+        }
+        if (!wasEmoteEligible)
+        {
+            wasEmoteEligible = true;
+            nextShipEmote = now + UnityEngine.Random.Range(3f, 9f);
+        }
+        if (shipEmote != 0 && now >= shipEmoteUntil)
+        {
+            SetShipEmote(0, string.Empty);
+            nextShipEmote = now + UnityEngine.Random.Range(8f, 20f);
+        }
+        else if (shipEmote == 0 && now >= nextShipEmote)
+        {
+            string custom = EmoteCompatibility.Choose(Body);
+            byte emote = custom.Length > 0 ? (byte)1 : (byte)UnityEngine.Random.Range(1, 3);
+            shipEmoteUntil = now + UnityEngine.Random.Range(3f, 6f);
+            SetShipEmote(emote, custom);
+        }
+    }
+
+    private void SetShipEmote(byte value, string custom)
+    {
+        shipEmote = value;
+        if (shipCustomEmote != custom)
+        {
+            shipCustomEmote = custom;
+            body.SetCustomEmote(custom);
+            Plugin.SyncBotEmote(Body, custom);
+        }
+        body.SetEmote(value);
+    }
+
+    private void TickBridgeFall(float now)
+    {
+        var controller = Body.thisController;
+        if (controller == null || !controller.enabled)
+        {
+            body.ApplyDamage(int.MaxValue, CauseOfDeath.Gravity, 0, Vector3.down, true);
+            bridgeFalling = false;
+            return;
+        }
+
+        bridgeFallVelocity = Mathf.Max(-150f, bridgeFallVelocity - 38f * Time.deltaTime);
+        CollisionFlags collision = controller.Move(Vector3.up * (bridgeFallVelocity * Time.deltaTime));
+        agent.transform.position = Body.transform.position;
+        body.Pose(Body.transform.position, Body.transform.rotation, false, false, false);
+        bool landed = (collision & CollisionFlags.Below) != 0 &&
+            (bridgeFallStartHeight - Body.transform.position.y > 0.2f || now - bridgeFallStarted > 2f);
+        if (!landed && bridgeFallStartHeight - Body.transform.position.y < 100f && now - bridgeFallStarted < 12f)
+            return;
+
+        bridgeFalling = false;
+        body.SetJumping(false);
+        int damage = MovementPolicy.FallDamage(bridgeFallVelocity, landed);
+        if (damage > 0)
+            body.ApplyDamage(damage, CauseOfDeath.Gravity, 0, Vector3.down * Mathf.Abs(bridgeFallVelocity), true);
+        if (body.Dead)
+            return;
+        if (NavMesh.SamplePosition(Body.transform.position, out var landing, 2f, agent.areaMask) &&
+            Mathf.Abs(landing.position.y - Body.transform.position.y) < 1.5f)
+        {
+            agent.transform.position = landing.position;
+            agent.enabled = true;
+            nextRoute = 0f;
+        }
+        director.RequestReplan();
+    }
+
+    private bool TickJump(float now)
+    {
+        if (!jumping)
+        {
+            if (!agent.isOnOffMeshLink)
+            {
+                agent.autoTraverseOffMeshLink = false;
+                return false;
+            }
+            var link = agent.currentOffMeshLinkData;
+            if (!link.valid || !director.IsJumpLink(link.startPos, link.endPos))
+            {
+                agent.autoTraverseOffMeshLink = true;
+                return false;
+            }
+            if (!director.JumpPathSafe(link.startPos, link.endPos, Inside))
+            {
+                agent.Warp(link.startPos);
+                ResetPath();
+                nextRoute = now + 1f;
+                director.RequestReplan();
+                return true;
+            }
+            jumping = true;
+            jumpStart = Position;
+            jumpEnd = link.endPos;
+            jumpStarted = now;
+            jumpDuration = Mathf.Clamp(Vector3.Distance(jumpStart, jumpEnd) / 4f, 0.5f, 1.1f);
+            agent.updatePosition = false;
+            body.SetJumping(true);
+        }
+
+        float progress = Mathf.Clamp01((now - jumpStarted) / jumpDuration);
+        Vector3 position = Vector3.Lerp(jumpStart, jumpEnd, progress) + Vector3.up * (1.5f * 4f * progress * (1f - progress));
+        agent.transform.position = position;
+        Vector3 direction = jumpEnd - jumpStart;
+        direction.y = 0f;
+        Quaternion rotation = direction.sqrMagnitude > 0.01f ? Quaternion.LookRotation(direction) : Body.transform.rotation;
+        body.Pose(position, rotation, true, Inside, false, false, direction.normalized * speed);
+        if (progress < 1f)
+            return true;
+
+        agent.CompleteOffMeshLink();
+        agent.updatePosition = true;
+        jumping = false;
+        body.SetJumping(false);
+        nextRoute = 0f;
+        return true;
     }
 
     private bool UpdateSpikeMovement(float now)
@@ -650,7 +971,7 @@ internal sealed class CrewBot : IDisposable, IBot
 
     private void CheckExtractionProgress(float now)
     {
-        if (!director.IsLate() || Aboard || waitingForSpike || liftPhase != LiftPhase.None ||
+        if (!director.IsLate() && !director.EarlyDepartureVote || Aboard || waitingForSpike || liftPhase != LiftPhase.None ||
             order.Kind != TaskKind.Return && order.Kind != TaskKind.Transport && order.Kind != TaskKind.Guard)
         {
             lastExtractionPosition = Position;
@@ -767,7 +1088,7 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
         lightningRetreat = null;
-        bool retreatingIntent = Inside && (now < retreatUntil || order.Kind == TaskKind.Evade);
+        bool retreatingIntent = director.EarlyDepartureVote || Inside && (now < retreatUntil || order.Kind == TaskKind.Evade);
         visibleThreat = Aboard ? null : director.Board.Tactical(Position, Inside, Body, now);
         if (Inside && now >= nextVisit)
         {
@@ -810,6 +1131,12 @@ internal sealed class CrewBot : IDisposable, IBot
         {
             if (primedGrenade != null)
                 UpdateGrenade(null, now);
+            ResetPath();
+            return;
+        }
+
+        if (Aboard && body.TerminalUsing && order.Kind == TaskKind.ShipControl)
+        {
             ResetPath();
             return;
         }
@@ -879,16 +1206,21 @@ internal sealed class CrewBot : IDisposable, IBot
             float best = float.NegativeInfinity;
             int sector = 0;
             bool moving = agent.velocity.sqrMagnitude > 0.04f;
+            IBot? companion = order.Partner != null && order.Partner.Available ? order.Partner : director.NearbyLookingCompanion(this);
             int sectorCount = moving ? 3 : lookHistory.Length;
             for (; sector < sectorCount; ++sector)
             {
-                float angle = moving ? (sector - 1) * 45f : sector * 45f;
+                float angle = moving ? (sector - 1) * 60f : sector * 45f;
                 Vector3 direction = Quaternion.Euler(0f, angle, 0f) * forward;
                 float score = now - lookHistory[sector] + director.Board.Risk(Position + direction * 10f, Inside, now) * 12f;
-                if (order.Partner != null && order.Partner.Available)
+                if (companion != null)
                 {
-                    Vector3 partnerForward = order.Partner.Body.gameplayCamera.transform.forward;
-                    score -= Vector3.Dot(direction, partnerForward) * 8f;
+                    Vector3 partnerForward = companion.Body.gameplayCamera.transform.forward;
+                    partnerForward.y = 0f;
+                    if (partnerForward.sqrMagnitude > 0.01f)
+                        score -= Vector3.Dot(direction.normalized, partnerForward.normalized) * 16f;
+                    if (moving)
+                        score += (Body.playerClientId < companion.Body.playerClientId ? -1f : 1f) * angle * 0.15f;
                 }
                 if (score > best)
                 {
@@ -897,7 +1229,7 @@ internal sealed class CrewBot : IDisposable, IBot
                 }
             }
             lookHistory[selected] = now;
-            scanAngle = moving ? (selected - 1) * 45f : Mathf.DeltaAngle(0f, selected * 45f);
+            scanAngle = moving ? (selected - 1) * 60f : Mathf.DeltaAngle(0f, selected * 45f);
             scanHeight = UnityEngine.Random.Range(0.7f, 2.5f);
             scanning = true;
             lookPoint = Position + Quaternion.Euler(0f, scanAngle, 0f) * forward * 12f + Vector3.up * scanHeight;
@@ -924,7 +1256,7 @@ internal sealed class CrewBot : IDisposable, IBot
             nextKeySearch = now + 2f;
             foreach (var candidate in Blackboard.Items)
             {
-                if ((Inside && candidate is KeyItem || !Aboard && candidate is Shovel && !candidate.isInShipRoom) && candidate.isActiveAndEnabled && candidate.IsSpawned && candidate.grabbable && !candidate.isHeld && !candidate.heldByPlayerOnServer && !candidate.isHeldByEnemy &&
+                if ((Inside && candidate is KeyItem || !Aboard && candidate is Shovel && !candidate.isInShipRoom && (!Inside || director.Board.IndoorEnemyKnown(now))) && director.CanTakeSharedEquipment(this, candidate, now) && candidate.isActiveAndEnabled && candidate.IsSpawned && candidate.grabbable && !candidate.isHeld && !candidate.heldByPlayerOnServer && !candidate.isHeldByEnemy &&
                     (Position - candidate.transform.position).sqrMagnitude < 2.25f &&
                     !Physics.Linecast(Position + Vector3.up, candidate.transform.position, director.Board.SightMask, QueryTriggerInteraction.Ignore))
                 {
@@ -935,6 +1267,8 @@ internal sealed class CrewBot : IDisposable, IBot
         }
         var contact = director.Board.Nearby(Position, Inside, now);
         var danger = director.Board.NearbyFleeing(Position, Inside, Body, now);
+        if (Inside && visibleThreat == null && danger == null && order.Kind != TaskKind.AssistPeeper)
+            body.PocketHeldWeapon();
         if (danger != null && ((Position - danger.Sample.Position).sqrMagnitude < 81f || danger.Sample.Pursuing == Body))
             contact = danger;
         if (!retreatingIntent && !Aboard && now >= nextEquipmentSearch && (contact == null ||
@@ -980,7 +1314,7 @@ internal sealed class CrewBot : IDisposable, IBot
             }
         }
         if (!grenadeInUse && !slimeMusic && BotSettings.Defend && contact != null && Blackboard.MustFlee(contact, Body) &&
-            (Position - contact.Sample.Position).sqrMagnitude < 16f && !(Body.currentlyHeldObjectServer is Shovel) &&
+            (Position - contact.Sample.Position).sqrMagnitude < (contact.Source is MaskedPlayerEnemy ? 64f : 16f) && !(Body.currentlyHeldObjectServer is Shovel) &&
             (body.FindItem<ShotgunItem>() == null || body.FindItem<ShotgunItem>()!.shellsLoaded <= 0))
             body.EquipWeapon();
         bool attacked = !grenadeInUse && !slimeMusic && TryAttack(contact, now);
@@ -1049,6 +1383,11 @@ internal sealed class CrewBot : IDisposable, IBot
             Escape(contact!.Sample.Position, now);
             return;
         }
+        if (Inside && !retreatingIntent && !maintainingGaze && visibleThreat == null && contact == null &&
+            liftPhase == LiftPhase.None && TryFixValve(now))
+            return;
+        if (!Inside || retreatingIntent || maintainingGaze || visibleThreat != null || contact != null)
+            targetValve = null;
         if (!Inside && !Aboard && director.Board.NearbyForestGiant(Position, false) is ForestGiantAI nearbyGiant &&
             TryForestDetour(nearbyGiant, now))
             return;
@@ -1064,7 +1403,7 @@ internal sealed class CrewBot : IDisposable, IBot
         }
         if (order.Kind == TaskKind.ShipControl && Aboard)
         {
-            if ((Position - order.Point).sqrMagnitude > 1f)
+            if ((Position - order.Point).sqrMagnitude > 0.36f)
                 MoveTo(order.Point, now);
             else
                 ResetPath();
@@ -1199,6 +1538,52 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
 
+        if (order.Kind == TaskKind.OpenDelivery)
+        {
+            var delivery = director.Dropship;
+            if (delivery == null || !delivery.shipLanded || delivery.shipDoorsOpened || delivery.triggerScript == null)
+            {
+                Finish(0f);
+                return;
+            }
+            if ((Position - order.Point).sqrMagnitude > 2.25f)
+            {
+                MoveTo(order.Point, now);
+                return;
+            }
+            ResetPath();
+            scanning = false;
+            lookPoint = delivery.triggerScript.transform.position;
+            nextLook = now + 1f;
+            if (now >= nextDeliveryOpen && (Position - delivery.triggerScript.transform.position).sqrMagnitude < 16f)
+            {
+                nextDeliveryOpen = now + 2f;
+                delivery.TryOpeningShip();
+            }
+            return;
+        }
+
+        if (order.Kind == TaskKind.DeliverDelivery)
+        {
+            var deliveredItem = order.Item;
+            if (deliveredItem == null || !deliveredItem.IsSpawned || !deliveredItem.isHeld || deliveredItem.playerHeldBy != Body)
+            {
+                Finish(0f);
+                return;
+            }
+            if (!Aboard || (Position - director.Ship).sqrMagnitude > 1.44f)
+            {
+                MoveTo(director.Ship, now);
+                return;
+            }
+            if (body.EquipItem(deliveredItem) && body.Drop(true, director.Ship))
+            {
+                DeliveryRegistry.Items.Remove(deliveredItem);
+                Finish(0.45f);
+            }
+            return;
+        }
+
         if (order.Kind == TaskKind.Stage && !Inside)
         {
             var stagedItem = Cargo;
@@ -1225,6 +1610,12 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
 
+        if (Inside && director.TryJoinElevator(this, out var sharedLiftGoal))
+        {
+            NavigateElevator(sharedLiftGoal, now);
+            return;
+        }
+
         if (order.Kind == TaskKind.Escort && order.Partner != null)
         {
             if (!Inside || !order.Partner.Available || !order.Partner.Inside)
@@ -1247,7 +1638,7 @@ internal sealed class CrewBot : IDisposable, IBot
         }
 
         var item = order.Item;
-        if (order.Kind == TaskKind.Scavenge || order.Kind == TaskKind.EquipWeapon)
+        if (order.Kind == TaskKind.Scavenge || order.Kind == TaskKind.EquipWeapon || order.Kind == TaskKind.CollectDelivery)
         {
             if (item == null || Blackboard.HoarderNearItem(item) || LightningHazard.IsTarget(item) || item.isHeld || item.heldByPlayerOnServer || item.isHeldByEnemy)
             {
@@ -1283,13 +1674,22 @@ internal sealed class CrewBot : IDisposable, IBot
                 {
                     ResetPath();
                     if (FocusPickup(item, now))
-                        Finish((item is GunAmmo ammo ? CollectAmmo(ammo) : (body.PreparePickup(item) && body.Grab(item))) ? 0.45f : -0.2f);
+                        Finish((item is GunAmmo ammo && order.Kind != TaskKind.CollectDelivery ? CollectAmmo(ammo) :
+                            (body.PreparePickup(item) && body.Grab(item))) ? 0.45f : -0.2f);
                     return;
                 }
             }
         }
 
-        Vector3 goal = item != null ? item.transform.position : order.Point;
+        Vector3 goal = item != null && order.Kind == TaskKind.Scavenge && Inside ? director.Board.KnownLootPosition(item) :
+            item != null ? item.transform.position : order.Point;
+        if (item != null && order.Kind == TaskKind.Scavenge && Inside && (Position - goal).sqrMagnitude < 4f &&
+            (item.transform.position - goal).sqrMagnitude > 16f)
+        {
+            director.Board.ForgetLoot(item);
+            Finish(0f);
+            return;
+        }
         if (order.Kind == TaskKind.Explore && (Position - goal).sqrMagnitude <= Arrival * Arrival)
         {
             Finish(0.5f);
@@ -1297,6 +1697,79 @@ internal sealed class CrewBot : IDisposable, IBot
         }
 
         MoveTo(goal, now);
+    }
+
+    private bool TryFixValve(float now)
+    {
+        if (targetValve != null && (now >= valveDeadline || !targetValve.isActiveAndEnabled ||
+            targetValve.triggerScript == null || !targetValve.triggerScript.interactable))
+        {
+            targetValve = null;
+            nextValveSearch = now + 5f;
+            ResetPath();
+            nextRoute = 0f;
+        }
+
+        if (targetValve == null)
+        {
+            if (now < nextValveSearch)
+                return false;
+            nextValveSearch = now + 1f;
+            float closest = 49f;
+            Vector3 eye = Body.gameplayCamera.transform.position;
+            foreach (var valve in director.SteamValves(now))
+            {
+                if (valve == null || !valve.isActiveAndEnabled || valve.triggerScript == null ||
+                    !valve.triggerScript.interactable || valve.fixInteract == null)
+                    continue;
+                Vector3 point = valve.triggerScript.transform.position;
+                Vector3 direction = point - eye;
+                float distance = direction.sqrMagnitude;
+                if (distance >= closest || Vector3.Angle(Body.gameplayCamera.transform.forward, direction) > 65f)
+                    continue;
+                if (Physics.Linecast(eye, point, out var hit, director.Board.SightMask, QueryTriggerInteraction.Ignore) &&
+                    hit.collider != null && hit.collider.transform != valve.transform && !hit.collider.transform.IsChildOf(valve.transform))
+                    continue;
+                closest = distance;
+                targetValve = valve;
+            }
+            if (targetValve == null)
+                return false;
+            valveDeadline = now + 6f;
+        }
+
+        Vector3 target = targetValve.triggerScript.transform.position;
+        scanning = false;
+        lookPoint = target;
+        nextLook = now + 0.5f;
+        Vector3 horizontal = target - Position;
+        horizontal.y = 0f;
+        if (horizontal.sqrMagnitude > 2.25f)
+        {
+            MoveTo(target, now);
+            return true;
+        }
+
+        ResetPath();
+        Vector3 eyePosition = Body.gameplayCamera.transform.position;
+        if ((target - eyePosition).sqrMagnitude > 6.25f ||
+            Physics.Linecast(eyePosition, target, out var obstruction, director.Board.SightMask, QueryTriggerInteraction.Ignore) &&
+            obstruction.collider != null && obstruction.collider.transform != targetValve.transform &&
+            !obstruction.collider.transform.IsChildOf(targetValve.transform))
+        {
+            targetValve = null;
+            nextValveSearch = now + 5f;
+            nextRoute = 0f;
+            return false;
+        }
+        if (Vector3.Angle(Body.gameplayCamera.transform.forward, target - Body.gameplayCamera.transform.position) > 25f)
+            return true;
+        targetValve.FixValve();
+        director.Record(this, "steam_valve", $"position={target}");
+        targetValve = null;
+        nextValveSearch = now + 1f;
+        nextRoute = 0f;
+        return true;
     }
 
     private static Vector3 PickupPoint(GrabbableObject item)
@@ -1655,11 +2128,11 @@ internal sealed class CrewBot : IDisposable, IBot
             enemy.isEnemyDead || enemy.enemyType == null || !enemy.enemyType.canDie || enemy is SpringManAI)
             return false;
 
-        Vector3 target = position + Vector3.up;
+        bool masked = enemy is MaskedPlayerEnemy;
+        Vector3 target = masked ? MeleeTargetPoint(enemy) : position + Vector3.up;
         Vector3 camera = Body.gameplayCamera.transform.position;
         Vector3 direction = target - camera;
-        if (direction.sqrMagnitude > 3.24f ||
-            Physics.Linecast(camera, target, director.Board.SightMask, QueryTriggerInteraction.Ignore))
+        if (direction.sqrMagnitude > (masked ? 36f : 3.24f) || !MeleeTargetVisible(enemy, target))
             return false;
 
         foreach (var player in Body.playersManager.allPlayerScripts)
@@ -1674,14 +2147,49 @@ internal sealed class CrewBot : IDisposable, IBot
         scanning = false;
         lookPoint = target;
         nextLook = now + 1f;
+        if (masked)
+        {
+            Vector3 relative = enemy.agent != null && enemy.agent.enabled && enemy.agent.isOnNavMesh ? enemy.agent.velocity : Vector3.zero;
+            if (agent.enabled && agent.isOnNavMesh)
+                relative -= agent.velocity;
+            Vector3 horizontal = target - camera;
+            horizontal.y = 0f;
+            relative.y = 0f;
+            Vector3 predicted = horizontal + Vector3.ClampMagnitude(relative, 12f) * 0.48f;
+            if (!MeleePolicy.ShouldSwingMasked(horizontal.sqrMagnitude, predicted.sqrMagnitude))
+                return true;
+        }
         if (now >= nextSwing && !weapon.reelingUp && Vector3.Angle(Body.gameplayCamera.transform.forward, direction) < 15f)
         {
             weapon.ItemActivate(true, true);
             swingWeapon = weapon;
-            releaseSwingAt = now + 0.4f;
+            releaseSwingAt = now + (masked ? 0.05f : 0.4f);
             nextSwing = now + 1f;
+            if (masked)
+            {
+                meleeAimTarget = enemy;
+                meleeAimUntil = now + 0.65f;
+            }
         }
         return true;
+    }
+
+    private Vector3 MeleeTargetPoint(EnemyAI enemy)
+    {
+        if (meleeAimTarget != enemy || meleeAimCollider == null)
+        {
+            meleeAimTarget = enemy;
+            var collision = enemy.GetComponentInChildren<EnemyAICollisionDetect>();
+            meleeAimCollider = collision != null ? collision.GetComponent<Collider>() : null;
+        }
+        return meleeAimCollider != null && meleeAimCollider.enabled ? meleeAimCollider.bounds.center : enemy.transform.position + Vector3.up;
+    }
+
+    private bool MeleeTargetVisible(EnemyAI enemy, Vector3 target)
+    {
+        return !Physics.Linecast(Body.gameplayCamera.transform.position, target, out var hit,
+            director.Board.SightMask, QueryTriggerInteraction.Ignore) || hit.collider != null &&
+            (hit.collider.transform == enemy.transform || hit.collider.transform.IsChildOf(enemy.transform));
     }
 
     private bool GiantFacing(ForestGiantAI giant)
@@ -1921,8 +2429,8 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
         bool retreating = Inside && !intoFactory && now < retreatUntil;
-        if (Inside && !intoFactory && Cargo == null && order.Kind != TaskKind.Evade && !retreating &&
-            now - enteredAt < 8f && !director.IsLate())
+        if (Inside && !intoFactory && Cargo == null && order.Kind != TaskKind.Evade && order.Kind != TaskKind.Guard && !retreating &&
+            now - enteredAt < 8f && !director.IsLate() && !director.EarlyDepartureVote)
         {
             Assign(new Order(TaskKind.Hold, Position, true));
             director.RequestReplan();
@@ -1993,6 +2501,10 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
 
+        scanning = false;
+        lookPoint = entrance + Vector3.up * 1.2f;
+        nextLook = now + 0.5f;
+
         if (openingPortal != portal)
         {
             CloseOpeningPortal();
@@ -2003,7 +2515,10 @@ internal sealed class CrewBot : IDisposable, IBot
                 portal.StartOpeningEntrance();
             return;
         }
-        if (now < portalReadyAt)
+        Vector3 facingDoor = entrance - Position;
+        facingDoor.y = 0f;
+        if (now < portalReadyAt || now < portalReadyAt + 1.5f && facingDoor.sqrMagnitude > 0.01f &&
+            Vector3.Angle(Body.transform.forward, facingDoor) > 25f)
             return;
 
         Vector3 landing;
@@ -2412,6 +2927,9 @@ internal sealed class CrewBot : IDisposable, IBot
         if (count < 2 || count == corners.Length)
             return false;
         Vector3 firstCorner = corners[1];
+        Vector3 firstDirection = firstCorner - Position;
+        firstDirection.y = 0f;
+        float directLength = PathLength(corners, count);
         if (count >= 3)
         {
             Vector3 corner = firstCorner;
@@ -2427,12 +2945,12 @@ internal sealed class CrewBot : IDisposable, IBot
                 previousCorner = corner;
                 hasPreviousCorner = true;
                 Vector3 rounded = corner + edge.normal * 0.75f + outgoing.normalized * 0.8f;
-                if (StartWaypoint(rounded, goal, now))
+                if (StartWaypoint(rounded, goal, destination.position, firstDirection, directLength, now))
                     return true;
             }
         }
 
-        if (laneUsed)
+        if (Inside || laneUsed)
             return false;
         laneUsed = true;
         Vector3 segment = firstCorner - Position;
@@ -2446,17 +2964,49 @@ internal sealed class CrewBot : IDisposable, IBot
         Vector3 direction = segment / length;
         Vector3 side = Vector3.Cross(Vector3.up, direction);
         Vector3 staggered = Position + direction * Mathf.Min(length * 0.6f, 7f) + side * (lane * 0.65f);
-        return StartWaypoint(staggered, goal, now);
+        return StartWaypoint(staggered, goal, destination.position, firstDirection, directLength, now);
     }
 
-    private bool StartWaypoint(Vector3 candidate, Vector3 goal, float now)
+    private static float PathLength(Vector3[] points, int count)
+    {
+        float length = 0f;
+        for (int index = 1; index < count; index++)
+            length += Vector3.Distance(points[index - 1], points[index]);
+        return length;
+    }
+
+    private bool StartWaypoint(Vector3 candidate, Vector3 goal, Vector3 navigationGoal, Vector3 directDirection, float directLength, float now)
     {
         if (!NavMesh.SamplePosition(candidate, out var hit, 0.8f, agent.areaMask) ||
             Mathf.Abs(hit.position.y - Position.y) > 1.5f || (hit.position - Position).sqrMagnitude < 2.25f ||
             !NavMesh.FindClosestEdge(hit.position, out var edge, agent.areaMask) || edge.distance < 0.4f ||
-            !NavMesh.CalculatePath(hit.position, goal, agent.areaMask, candidatePath) ||
-            candidatePath.status != NavMeshPathStatus.PathComplete || !TryRoute(hit.position, now, false))
+            !agent.CalculatePath(hit.position, path) || path.status != NavMeshPathStatus.PathComplete)
             return false;
+
+        int firstCount = path.GetCornersNonAlloc(corners);
+        if (firstCount < 2 || firstCount == corners.Length)
+            return false;
+        float firstLength = PathLength(corners, firstCount);
+        Vector3 firstDirection = corners[1] - corners[0];
+        Vector3 arrivalDirection = corners[firstCount - 1] - corners[firstCount - 2];
+        firstDirection.y = 0f;
+        arrivalDirection.y = 0f;
+        if (firstDirection.sqrMagnitude < 0.01f || arrivalDirection.sqrMagnitude < 0.01f || directDirection.sqrMagnitude < 0.01f ||
+            !NavMesh.CalculatePath(hit.position, navigationGoal, agent.areaMask, candidatePath) ||
+            candidatePath.status != NavMeshPathStatus.PathComplete)
+            return false;
+        int secondCount = candidatePath.GetCornersNonAlloc(corners);
+        if (secondCount < 2 || secondCount == corners.Length)
+            return false;
+        float secondLength = PathLength(corners, secondCount);
+        Vector3 departureDirection = corners[1] - corners[0];
+        departureDirection.y = 0f;
+        if (departureDirection.sqrMagnitude < 0.01f || !MovementPolicy.AcceptWaypoint(directLength, firstLength, secondLength,
+            Vector3.Dot(firstDirection.normalized, directDirection.normalized),
+            Vector3.Dot(arrivalDirection.normalized, departureDirection.normalized)) || !TryRoute(hit.position, now, false))
+            return false;
+        if (now < recoveryUntil)
+            return true;
         waypointActive = true;
         agent.autoBraking = false;
         waypointGoal = hit.position;
@@ -2503,6 +3053,14 @@ internal sealed class CrewBot : IDisposable, IBot
         int count = path.GetCornersNonAlloc(corners);
         if (count == corners.Length || count == 0)
             return false;
+        if (path.status != NavMeshPathStatus.PathComplete &&
+            TryBridgePartialPath(hit.position, corners[count - 1], Inside, now) &&
+            agent.CalculatePath(hit.position, path))
+        {
+            count = path.GetCornersNonAlloc(corners);
+            if (count == 0 || count == corners.Length)
+                return false;
+        }
         DoorLock? blockedDoor = null;
         if (path.status != NavMeshPathStatus.PathComplete)
         {
@@ -2553,6 +3111,7 @@ internal sealed class CrewBot : IDisposable, IBot
                 order.Kind != TaskKind.Guard && !director.IsLate();
             bool initiallyInMechSight = fleeing && director.Board.InMechSight(Position, Inside);
             float initialDogRisk = Blackboard.DogProximityRisk(Position, Inside);
+            float initialDeathRisk = director.Board.DeathRisk(Position, Inside, now);
             bool leavingDog = !fleeing && initialDogRisk / BotSettings.RiskTolerance >= 0.55f;
             float previousAreaRisk = director.Board.AreaRisk(Position, Inside);
             bool leavingArea = previousAreaRisk >= 0.5f;
@@ -2576,6 +3135,10 @@ internal sealed class CrewBot : IDisposable, IBot
                         director.Board.Risk(point, Inside, now, includeRouteFailures, true, false, ignoredEnemy);
                     if (risk >= 0.55f)
                     {
+                        float deathRisk = director.Board.DeathRisk(point, Inside, now);
+                        if (!fleeing && initialDeathRisk > 0f && deathRisk > 0f && deathRisk <= initialDeathRisk &&
+                            director.Board.Risk(point, Inside, now, includeRouteFailures, true, false, ignoredEnemy, false) < 0.55f)
+                            continue;
                         float dogRisk = Blackboard.DogProximityRisk(point, Inside);
                         if (!leavingDog || dogRisk > initialDogRisk + 0.04f ||
                             director.Board.Risk(point, Inside, now, includeRouteFailures, false, false, ignoredEnemy) >= 0.55f)
@@ -2782,7 +3345,12 @@ internal sealed class CrewBot : IDisposable, IBot
         liftPhase = LiftPhase.Board;
         liftProgressPosition = Body.transform.position;
         liftProgressTime = now;
-        agent.enabled = false;
+        liftBoardingOnNavMesh = NavMesh.SamplePosition(lift.elevatorInsidePoint.position, out var inside, 1f, agent.areaMask) &&
+            lift.elevatorBounds.bounds.Contains(inside.position + Vector3.up * 0.5f) &&
+            agent.CalculatePath(inside.position, candidatePath) && candidatePath.status == NavMeshPathStatus.PathComplete &&
+            agent.SetPath(candidatePath);
+        if (!liftBoardingOnNavMesh)
+            agent.enabled = false;
     }
 
     private void TickElevator(float now)
@@ -2795,6 +3363,8 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
 
+        director.ReserveElevator(this, now);
+
         if (liftPhase == LiftPhase.Board)
         {
             if (!lift.elevatorFinishedMoving || !lift.elevatorDoorOpen)
@@ -2802,17 +3372,41 @@ internal sealed class CrewBot : IDisposable, IBot
                 AbortElevator();
                 return;
             }
+            if (liftBoardingOnNavMesh && agent.enabled && agent.isOnNavMesh)
+            {
+                Vector3 velocity = agent.velocity;
+                velocity.y = 0f;
+                Quaternion rotation = velocity.sqrMagnitude > 0.04f
+                    ? Quaternion.RotateTowards(Body.transform.rotation, Quaternion.LookRotation(velocity), aimSpeed * Time.deltaTime)
+                    : Body.transform.rotation;
+                body.Pose(agent.transform.position, rotation, velocity.sqrMagnitude > 0.04f, true, false, false, velocity);
+                if ((Body.transform.position - liftProgressPosition).sqrMagnitude > 0.16f)
+                {
+                    liftProgressPosition = Body.transform.position;
+                    liftProgressTime = now;
+                }
+                else if (now - liftProgressTime > 2f || !agent.pathPending && !agent.hasPath)
+                {
+                    liftBoardingOnNavMesh = false;
+                    agent.enabled = false;
+                    liftProgressTime = now;
+                }
+            }
             Vector3 toCenter = Body.transform.position - lift.elevatorInsidePoint.position;
             toCenter.y = 0f;
             if (lift.elevatorBounds.bounds.Contains(Body.transform.position + Vector3.up * 0.5f) && toCenter.sqrMagnitude < 2.25f)
             {
                 liftOffset = lift.elevatorInsidePoint.InverseTransformPoint(Body.transform.position);
                 liftPhase = LiftPhase.Ride;
+                liftBoardedAt = now;
+                liftBoardingOnNavMesh = false;
+                if (agent.enabled)
+                    agent.enabled = false;
                 Plugin.Log.LogInfo($"Bot {Body.playerClientId} boarded the mineshaft elevator.");
-                director.UseElevatorControl(this, false, false, now);
                 return;
             }
-            MoveInsideElevator(lift.elevatorInsidePoint.position, now);
+            if (!liftBoardingOnNavMesh)
+                MoveInsideElevator(lift.elevatorInsidePoint.position, now);
             return;
         }
 
@@ -2826,19 +3420,22 @@ internal sealed class CrewBot : IDisposable, IBot
                 liftPhase = LiftPhase.Exit;
                 liftProgressPosition = position;
                 liftProgressTime = now;
+                liftExitPosition = FindElevatorExit(lift, ElevatorLanding(lift, !liftGoingDown));
             }
-            else if (lift.elevatorFinishedMoving && lift.elevatorMovingDown != liftGoingDown)
+            else if (lift.elevatorFinishedMoving && lift.elevatorMovingDown != liftGoingDown &&
+                !director.WaitForElevatorCrew(this, liftGoingDown, liftBoardedAt, now))
                 director.UseElevatorControl(this, false, false, now);
             return;
         }
 
         if (!lift.elevatorFinishedMoving || !lift.elevatorDoorOpen)
             return;
-        Vector3 exit = ElevatorLanding(lift, !liftGoingDown);
+        Vector3 exit = liftExitPosition;
         Vector3 toExit = Body.transform.position - exit;
         toExit.y = 0f;
         if (toExit.sqrMagnitude <= 2.25f && Mathf.Abs(Body.transform.position.y - exit.y) < 3f &&
-            NavMesh.SamplePosition(Body.transform.position, out var hit, 1.25f, agent.areaMask))
+            NavMesh.SamplePosition(Body.transform.position, out var hit, 1.25f, agent.areaMask) &&
+            !lift.elevatorBounds.bounds.Contains(hit.position + Vector3.up * 0.5f))
         {
             agent.transform.position = hit.position;
             agent.enabled = true;
@@ -2856,6 +3453,30 @@ internal sealed class CrewBot : IDisposable, IBot
             return;
         }
         MoveInsideElevator(exit, now);
+    }
+
+    private Vector3 FindElevatorExit(MineshaftElevatorController lift, Vector3 landing)
+    {
+        Vector3 best = landing;
+        float bestScore = float.PositiveInfinity;
+        for (int index = 0; index < 17; index++)
+        {
+            float radius = index == 0 ? 0f : index <= 8 ? 1.5f : 3f;
+            float angle = (index - 1) * Mathf.PI / 4f;
+            Vector3 candidate = landing + new Vector3(Mathf.Cos(angle) * radius, 0f, Mathf.Sin(angle) * radius);
+            if (!NavMesh.SamplePosition(candidate, out var hit, 1f, agent.areaMask) ||
+                Mathf.Abs(hit.position.y - landing.y) > 2f ||
+                lift.elevatorBounds.bounds.Contains(hit.position + Vector3.up * 0.5f) ||
+                Physics.Linecast(Body.transform.position + Vector3.up * 0.5f, hit.position + Vector3.up * 0.5f,
+                    director.Board.SightMask, QueryTriggerInteraction.Ignore))
+                continue;
+            float score = (hit.position - landing).sqrMagnitude;
+            if (score >= bestScore)
+                continue;
+            best = hit.position;
+            bestScore = score;
+        }
+        return best;
     }
 
     private void MoveInsideElevator(Vector3 target, float now)
@@ -2886,6 +3507,7 @@ internal sealed class CrewBot : IDisposable, IBot
     {
         if (liftPhase != LiftPhase.None)
             Plugin.Log.LogWarning($"Bot {Body.playerClientId} could not complete elevator travel ({liftPhase}).");
+        liftBoardingOnNavMesh = false;
         if (!agent.enabled && NavMesh.SamplePosition(Body.transform.position, out var hit, 2f, agent.areaMask))
         {
             agent.transform.position = hit.position;
@@ -2971,6 +3593,9 @@ internal sealed class CrewBot : IDisposable, IBot
         if (disposed)
             return;
         disposed = true;
+        if (!Died)
+            BotAvatars.Remove(Body);
+        director.Bridges.Release(this);
         CloseOpeningPortal();
         director.ReleaseElevator(this);
         if (Body != null && Body.IsOwnedByServer && NetworkManager.Singleton != null && NetworkManager.Singleton.IsListening && !NetworkManager.Singleton.ShutdownInProgress)

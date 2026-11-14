@@ -11,9 +11,18 @@ internal static class BotRolePolicy
 {
     internal static void Targets(int botCount, out int explorers, out int haulers, out int shipSupport)
     {
-        shipSupport = botCount >= 3 ? System.Math.Max(1, botCount / 5) : 0;
-        haulers = botCount >= 2 ? System.Math.Max(1, botCount / 3) : 0;
+        shipSupport = botCount >= 2 ? 1 : 0;
+        haulers = botCount >= 3 ? System.Math.Max(1, botCount / 3) : 0;
         explorers = System.Math.Max(0, botCount - shipSupport - haulers);
+    }
+
+    internal static bool PreferSupport(int health, bool current, bool aboard, int bestHealth, bool bestCurrent, bool bestAboard)
+    {
+        if (health != bestHealth)
+            return health < bestHealth;
+        if (current != bestCurrent)
+            return current;
+        return aboard && !bestAboard;
     }
 
     internal static float RetryDelay(int attempts)

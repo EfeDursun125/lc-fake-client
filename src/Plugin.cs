@@ -7,8 +7,10 @@ using UnityEngine;
 
 namespace LethalFakeClient;
 
-[BepInPlugin("dev.lethalfakeclient", "Lethal Fake Client", "0.9.29")]
+[BepInPlugin("dev.lethalfakeclient", "Lethal Fake Client", "0.9.50")]
 [BepInDependency("meow.ModelReplacementAPI", BepInDependency.DependencyFlags.SoftDependency)]
+[BepInDependency("BetterEmotes", BepInDependency.DependencyFlags.SoftDependency)]
+[BepInDependency("com.weliveinasociety.CustomEmotesAPI", BepInDependency.DependencyFlags.SoftDependency)]
 public sealed class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log = null!;
@@ -91,6 +93,8 @@ public sealed class Plugin : BaseUnityPlugin
 
     private static void CloseSession()
     {
+        if (session != null)
+            BotAvatars.Clear();
         session?.Dispose();
         session = null;
     }
@@ -118,6 +122,12 @@ public sealed class Plugin : BaseUnityPlugin
     internal static void BeforeRevive() => session?.BeforeRevive();
 
     internal static void HumanDroppedItem(GrabbableObject item) => session?.HumanDroppedItem(item);
+    internal static void DeliveryChanged() => session?.DeliveryChanged();
+
+    internal static void SyncBotEmote(PlayerControllerB player, string emote) => session?.SendBotEmote(player, emote);
+
+    internal static void SyncBotDroppedItem(PlayerControllerB player, GrabbableObject item, Vector3 localFloor, bool aboard, bool inside)
+        => session?.SendDroppedItem(player, item, localFloor, aboard, inside);
 
     internal static void Landing() => session?.PrepareRound();
 

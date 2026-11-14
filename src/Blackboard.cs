@@ -44,7 +44,8 @@ public static class ThreatSources
 
 internal enum TaskKind
 {
-    Hold, Explore, Scavenge, Transport, Escort, Return, Guard, Evade, Stage, EquipWeapon, ShipControl, CareBaby, AssistPeeper
+    Hold, Explore, Scavenge, Transport, Escort, Return, Guard, Evade, Stage, EquipWeapon, ShipControl, CareBaby, AssistPeeper,
+    OpenDelivery, CollectDelivery, DeliverDelivery
 }
 
 internal readonly struct Order
@@ -105,6 +106,7 @@ internal sealed class Blackboard
     }
 
     private static readonly AccessTools.FieldRef<NutcrackerEnemyAI, bool> inspecting = AccessTools.FieldRefAccess<NutcrackerEnemyAI, bool>("isInspecting");
+    private static readonly AccessTools.FieldRef<HoarderBugAI, bool> hoarderChasing = AccessTools.FieldRefAccess<HoarderBugAI, bool>("inChase");
     private static readonly AccessTools.FieldRef<NutcrackerEnemyAI, int> nutcrackerTarget = AccessTools.FieldRefAccess<NutcrackerEnemyAI, int>("lastPlayerSeenMoving");
 
     internal static bool IgnoreEnemy(Component source)
@@ -117,6 +119,14 @@ internal sealed class Blackboard
 
     private static bool AreaHazard(Component source) => source is BlobAI || source is CadaverBloomAI;
 
+    private static bool CoordinationThreat(Component source, ThreatSample sample)
+    {
+        bool ready = !(source is EnemyAI enemy) || enemy.ventAnimationFinished;
+        bool neutralOrHazard = NeutralHoarder(source) || AreaHazard(source) ||
+            source is Landmine || source is Turret || source is SpikeRoofTrap;
+        return CoordinationPolicy.RelevantThreat(sample.Outside, ready, neutralOrHazard);
+    }
+
     internal static bool MustFlee(Contact contact, PlayerControllerB bot)
     {
         if (IgnoreEnemy(contact.Source) || AreaHazard(contact.Source) || contact.Source is SpringManAI)
@@ -124,7 +134,7 @@ internal sealed class Blackboard
         if (contact.Source is ForestGiantAI giant)
             return giant.currentBehaviourStateIndex == 1 && giant.chasingPlayer == bot;
         if (contact.Source is HoarderBugAI hoarder)
-            return HoarderPolicy.IsHostile(hoarder.currentBehaviourStateIndex);
+            return HoarderHostile(hoarder);
         if (contact.Source is ButlerEnemyAI butler)
             return butler.targetPlayer == bot;
         if (contact.Source is NutcrackerEnemyAI nutcracker)
@@ -315,8 +325,9 @@ internal sealed class Blackboard
         humanDrops.Remove(item);
     }
 
-    private static bool NeutralHoarder(Component source) =>
-        source is HoarderBugAI bug && !HoarderPolicy.IsHostile(bug.currentBehaviourStateIndex);
+    private static bool HoarderHostile(HoarderBugAI bug) => HoarderPolicy.IsHostile(bug.currentBehaviourStateIndex, hoarderChasing(bug));
+
+    private static bool NeutralHoarder(Component source) => source is HoarderBugAI bug && !HoarderHostile(bug);
 
     internal static bool HoarderNearItem(GrabbableObject item)
     {
@@ -339,12 +350,15 @@ internal sealed class Blackboard
     private readonly Dictionary<Component, Contact> contacts = new Dictionary<Component, Contact>();
     private readonly List<Component> expired = new List<Component>();
     private readonly Dictionary<Vector3Int, (float Value, float Time)> routeRisk = new Dictionary<Vector3Int, (float, float)>();
+    private readonly Dictionary<(Vector3Int Cell, bool Inside), float> deaths = new Dictionary<(Vector3Int, bool), float>();
+    private readonly Dictionary<GrabbableObject, Vector3> knownLoot = new Dictionary<GrabbableObject, Vector3>();
     private readonly List<GrabbableObject> seenItems = new List<GrabbableObject>();
     private readonly int sightMask;
     private readonly EnvironmentalHazards hazards;
     private readonly AreaHazards areaHazards = new AreaHazards();
     internal SpikeTrapSafety Spikes { get; } = new SpikeTrapSafety();
     private float lastCoordinationThreat = float.NegativeInfinity;
+    private Component? coordinationSource;
     private float nextItemDiscovery;
     internal bool Coordinated { get; private set; }
     internal bool OutdoorThreat { get; private set; }
@@ -365,6 +379,16 @@ internal sealed class Blackboard
             Register(enemy);
         foreach (var item in UnityEngine.Object.FindObjectsOfType<GrabbableObject>())
             items.Add(item);
+    }
+
+    internal bool IndoorEnemyKnown(float now)
+    {
+        foreach (var contact in contacts.Values)
+            if (!contact.Sample.Outside && contact.Sample.Alive && now - contact.Seen < 12f &&
+                contact.Source is EnemyAI enemy && !enemy.isEnemyDead && enemy.isActiveAndEnabled &&
+                enemy.ventAnimationFinished && !NeutralHoarder(enemy) && !IgnoreEnemy(enemy) && !AreaHazard(enemy))
+                return true;
+        return false;
     }
 
     internal bool SlimeKnown(float now)
@@ -415,7 +439,8 @@ internal sealed class Blackboard
             if (enemy != null && !ThreatSources.Registered.ContainsKey(enemy))
                 Observe(enemy, new ThreatSample(enemy.transform.position, enemy.isOutside, !enemy.isEnemyDead && enemy.isActiveAndEnabled,
                     enemy is NutcrackerEnemyAI nutcracker ? NutcrackerTarget(nutcracker) :
-                    enemy is ForestGiantAI giant && giant.currentBehaviourStateIndex == 1 ? giant.chasingPlayer : enemy.targetPlayer), bots, learning, now, radarFocus);
+                    enemy is ForestGiantAI giant && giant.currentBehaviourStateIndex == 1 ? giant.chasingPlayer :
+                    enemy is HoarderBugAI hoarder && HoarderHostile(hoarder) && hoarder.targetPlayer == null ? hoarder.angryAtPlayer : enemy.targetPlayer), bots, learning, now, radarFocus);
         }
 
         expired.Clear();
@@ -453,7 +478,10 @@ internal sealed class Blackboard
         }
         foreach (var source in expired)
             contacts.Remove(source);
+        bool wasCoordinated = Coordinated;
         Coordinated = CoordinationPolicy.ShouldCoordinate(now, lastCoordinationThreat);
+        if (!wasCoordinated && Coordinated && coordinationSource != null)
+            Plugin.Log.LogInfo($"Indoor coordination started after observing {coordinationSource.GetType().Name} at {coordinationSource.transform.position}.");
     }
 
     private void Observe(Component source, ThreatSample sample, List<IBot> bots, Learning learning, float now, PlayerControllerB? radarFocus)
@@ -487,8 +515,13 @@ internal sealed class Blackboard
             contact.Seen = now;
             contact.Sample = sample;
             contact.Severity = Mathf.Clamp(0.48f + (sample.Pursuing != null ? 0.25f : 0f) - learning.Estimate(contact.Key) * 0.25f, 0.35f, 1f);
-            if (!NeutralHoarder(source) && !AreaHazard(source))
+            Vector3 radarEye = radarFocus.gameplayCamera != null ? radarFocus.gameplayCamera.transform.position : radarFocus.transform.position + Vector3.up;
+            if (CoordinationThreat(source, sample) && !Physics.Linecast(radarEye, sample.Position + Vector3.up * 0.8f,
+                sightMask, QueryTriggerInteraction.Ignore))
+            {
                 lastCoordinationThreat = now;
+                coordinationSource = source;
+            }
         }
 
         foreach (var bot in bots)
@@ -499,8 +532,11 @@ internal sealed class Blackboard
             Vector3 eye = bot.Position + Vector3.up * 1.4f;
             Vector3 target = sample.Position + Vector3.up * 0.8f;
             Vector3 direction = target - eye;
-            bool targetedBotNearby = sample.Pursuing == bot.Body && direction.sqrMagnitude <= 400f;
-            if (!targetedBotNearby && (direction.sqrMagnitude > 60f * 60f || direction.sqrMagnitude > 16f &&
+            bool targetedBotNearby = direction.sqrMagnitude <= 400f && (sample.Pursuing == bot.Body ||
+                source is HoarderBugAI hoarder && HoarderHostile(hoarder) && hoarder.angryAtPlayer == bot.Body);
+            bool nearbyFlyingHoarder = source is HoarderBugAI flying && HoarderHostile(flying) && direction.sqrMagnitude <= 144f &&
+                !Physics.Linecast(eye, target, sightMask, QueryTriggerInteraction.Ignore);
+            if (!targetedBotNearby && !nearbyFlyingHoarder && (direction.sqrMagnitude > 60f * 60f || direction.sqrMagnitude > 16f &&
                 Vector3.Angle(bot.Body.gameplayCamera.transform.forward, direction) > BotSettings.ViewAngle * 0.5f ||
                 Physics.Linecast(eye, target, sightMask, QueryTriggerInteraction.Ignore)))
                 continue;
@@ -519,8 +555,11 @@ internal sealed class Blackboard
             contact.Seen = now;
             contact.Sample = sample;
             contact.Severity = Mathf.Clamp(0.48f + contact.Speed * 0.025f + (sample.Pursuing != null ? 0.25f : 0f) - learning.Estimate(contact.Key) * 0.25f, 0.35f, 1f);
-            if (!NeutralHoarder(source) && !AreaHazard(source))
+            if (CoordinationThreat(source, sample))
+            {
                 lastCoordinationThreat = now;
+                coordinationSource = source;
+            }
             break;
         }
     }
@@ -667,7 +706,7 @@ internal sealed class Blackboard
     internal float StaticEnvironmentalRisk(Vector3 position, bool inside, Turret? ignored = null) => hazards.Risk(position, inside, ignored);
     internal Turret? DangerousTurret(Vector3 position, bool inside, PlayerControllerB bot) => hazards.DangerousTurret(position, inside, bot);
 
-    internal float Risk(Vector3 position, bool inside, float now, bool includeRouteFailures = true, bool includeDogs = true, bool includeAreas = true, EnemyAI? ignoredEnemy = null)
+    internal float Risk(Vector3 position, bool inside, float now, bool includeRouteFailures = true, bool includeDogs = true, bool includeAreas = true, EnemyAI? ignoredEnemy = null, bool includeDeaths = true)
     {
         float risk = InMechSight(position, inside) ? 1f : hazards.Risk(position, inside);
         if (includeDogs)
@@ -676,6 +715,8 @@ internal sealed class Blackboard
             risk = Mathf.Max(risk, areaHazards.Risk(position, inside));
         if (includeRouteFailures && routeRisk.TryGetValue(Cell(position), out var failure))
             risk = Mathf.Max(risk, failure.Value * Mathf.Clamp01(1f - (now - failure.Time) / 90f));
+        if (includeDeaths)
+            risk = Mathf.Max(risk, DeathRisk(position, inside, now));
         foreach (var contact in contacts.Values)
         {
             if (!contact.Sample.Alive || contact.Sample.Outside == inside || contact.Source == ignoredEnemy)
@@ -703,13 +744,67 @@ internal sealed class Blackboard
         routeRisk[cell] = (Mathf.Min(0.85f, previous + 0.23f), Time.time);
     }
 
-    internal List<GrabbableObject> ScavengableItems()
+    internal void RouteRecovered(Vector3 point) => routeRisk.Remove(Cell(point));
+
+    internal void RecordDeath(Vector3 position, bool inside, float now)
+    {
+        if (deaths.Count >= 256)
+            deaths.Clear();
+        deaths[(Cell(position), inside)] = now;
+    }
+
+    internal float DeathRisk(Vector3 position, bool inside, float now)
+    {
+        return deaths.TryGetValue((Cell(position), inside), out float time)
+            ? 0.72f * Mathf.Clamp01(1f - (now - time) / 180f) : 0f;
+    }
+
+    internal Vector3 KnownLootPosition(GrabbableObject item)
+    {
+        if (item == null)
+            return Vector3.zero;
+        return knownLoot.TryGetValue(item, out var position) ? position : item.transform.position;
+    }
+
+    internal void ForgetLoot(GrabbableObject item) => knownLoot.Remove(item);
+
+    internal List<GrabbableObject> ScavengableItems(List<IBot> bots)
     {
         seenItems.Clear();
         foreach (var item in Items)
         {
-            if (item != null && item.isActiveAndEnabled && item.IsSpawned && item.itemProperties != null && (item is RagdollGrabbableObject body && body.ragdoll != null && BotSettings.RecoverBodies ||
-                item.itemProperties.isScrap && item.scrapValue > 0 && BotSettings.CollectItems) && item.grabbable && !item.isHeld && !item.heldByPlayerOnServer && !item.isHeldByEnemy && !item.isInShipRoom)
+            if (item == null)
+                continue;
+            if (!item.isActiveAndEnabled || !item.IsSpawned || item.itemProperties == null || item.isHeld ||
+                item.heldByPlayerOnServer || item.isHeldByEnemy || item.isInShipRoom || !item.grabbable)
+            {
+                knownLoot.Remove(item);
+                continue;
+            }
+            if (!(item is RagdollGrabbableObject body && body.ragdoll != null && BotSettings.RecoverBodies ||
+                item.itemProperties.isScrap && item.scrapValue > 0 && BotSettings.CollectItems))
+                continue;
+            if (!item.isInFactory || item is RagdollGrabbableObject)
+            {
+                knownLoot[item] = item.transform.position;
+                seenItems.Add(item);
+                continue;
+            }
+            Vector3 point = item.transform.position + Vector3.up * 0.2f;
+            foreach (var bot in bots)
+            {
+                if (!bot.Available || !bot.Inside || (bot.Position - point).sqrMagnitude > 900f)
+                    continue;
+                Vector3 eye = bot.Body.gameplayCamera.transform.position;
+                if ((bot.Position - point).sqrMagnitude <= 16f ||
+                    !Physics.Linecast(eye, point, out var hit, SightMask, QueryTriggerInteraction.Ignore) ||
+                    hit.collider != null && (hit.collider.transform == item.transform || hit.collider.transform.IsChildOf(item.transform)))
+                {
+                    knownLoot[item] = item.transform.position;
+                    break;
+                }
+            }
+            if (knownLoot.ContainsKey(item))
                 seenItems.Add(item);
         }
         return seenItems;

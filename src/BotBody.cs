@@ -14,6 +14,7 @@ internal sealed class BotBody : IDisposable
     private static readonly int Sprinting = Animator.StringToHash("Sprinting");
     private static readonly int Sideways = Animator.StringToHash("Sideways");
     private static readonly int Crouching = Animator.StringToHash("crouching");
+    private static readonly int EmoteNumber = Animator.StringToHash("emoteNumber");
     private static readonly int AnimationSpeed = Animator.StringToHash("animationSpeed");
     private static readonly AccessTools.FieldRef<Terminal, InteractTrigger> TerminalTrigger =
         AccessTools.FieldRefAccess<Terminal, InteractTrigger>("terminalTrigger");
@@ -64,8 +65,20 @@ internal sealed class BotBody : IDisposable
     private bool leverUsing;
     private Vector3 lookPoint;
     private float lookPitch;
-    private readonly int rightHandLayer;
-    private readonly int bothHandsLayer;
+    private float lookPitchVelocity;
+    private int rightHandLayer;
+    private int bothHandsLayer;
+    private int specialAnimationsLayer;
+    private int emoteLayer;
+    private string customEmote = string.Empty;
+    private RuntimeAnimatorController? previousEmoteController;
+    private RuntimeAnimatorController? customEmoteController;
+    private bool customApiPlaying;
+    private int betterEmote;
+    private float nextCustomEmoteRetry;
+    private int emote;
+    private InteractTrigger? terminalPoseTrigger;
+    private GrabbableObject? terminalPocketedItem;
     private GrabbableObject? animatedItem;
     private string? grabAnimation;
     private float holdingWeight;
@@ -126,13 +139,34 @@ internal sealed class BotBody : IDisposable
         player.DisablePlayerModel(player.gameObject, enable: true, disableLocalArms: true);
         animator.enabled = true;
         animator.runtimeAnimatorController = player.playersManager.localClientAnimatorController;
-        rightHandLayer = animator.GetLayerIndex("HoldingItemsRightHand");
-        bothHandsLayer = animator.GetLayerIndex("HoldingItemsBothHands");
+        RefreshAnimatorLayers();
+        player.performingEmote = false;
+        player.emoteLayerWeight = 0f;
+        animator.SetInteger(EmoteNumber, 0);
         animator.SetFloat(AnimationSpeed, 1f);
     }
 
     internal void Pose(Vector3 point, Quaternion rotation, bool moving, bool inside, bool aboard, bool sprinting = false, Vector3 velocity = default)
     {
+        if (customEmoteController != null && animator.runtimeAnimatorController != customEmoteController)
+        {
+            animator.runtimeAnimatorController = customEmoteController;
+            RefreshAnimatorLayers();
+            animator.SetInteger(EmoteNumber, betterEmote);
+        }
+        if (customEmote.Length > 0 && !customApiPlaying && Time.time >= nextCustomEmoteRetry && EmoteCompatibility.IsApi(customEmote))
+        {
+            nextCustomEmoteRetry = Time.time + 1f;
+            if (EmoteCompatibility.TryPlayApi(Player, customEmote))
+            {
+                customApiPlaying = true;
+                emote = -1;
+                SetEmote(1);
+            }
+        }
+        Player.emoteLayerWeight = Mathf.MoveTowards(Player.emoteLayerWeight, emote != 0 ? 1f : 0f, Time.deltaTime * 10f);
+        if (emoteLayer >= 0)
+            animator.SetLayerWeight(emoteLayer, Player.emoteLayerWeight);
         Player.transform.SetPositionAndRotation(point, rotation);
         if (Player.isInElevator != aboard || Player.isInHangarShipRoom != aboard)
             Player.SetAllItemsInElevator(aboard, aboard);
@@ -141,15 +175,19 @@ internal sealed class BotBody : IDisposable
         Player.isInHangarShipRoom = aboard;
         Player.isSprinting = sprinting;
         animator.SetBool(Sprinting, sprinting);
+        bool specialAnimation = terminalUsing || leverUsing || Player.inSpecialInteractAnimation || Player.inAnimationWithEnemy != null;
+        Player.specialAnimationWeight = Mathf.MoveTowards(Player.specialAnimationWeight, specialAnimation ? 1f : 0f, Time.deltaTime * 12f);
+        if (specialAnimationsLayer >= 0)
+            animator.SetLayerWeight(specialAnimationsLayer, Player.specialAnimationWeight);
         UpdateHoldingAnimation();
         Vector3 localVelocity = Quaternion.Inverse(rotation) * velocity;
         if (moving && localVelocity.sqrMagnitude > 0.01f)
         {
             Vector3 direction = localVelocity.normalized;
             Player.moveInputVector = new Vector2(direction.x, direction.z);
-            bool sideways = Mathf.Abs(direction.z) < 0.2f;
+            bool sideways = MovementPolicy.MovesSideways(direction.x, direction.z);
             animator.SetBool(Sideways, sideways);
-            animator.SetFloat(AnimationSpeed, direction.z < 0.5f && direction.x < 0.5f ? -1f : 1f);
+            animator.SetFloat(AnimationSpeed, MovementPolicy.AnimationDirection(direction.x, direction.z, sideways));
         }
         else
         {
@@ -167,6 +205,8 @@ internal sealed class BotBody : IDisposable
     {
         var item = Player.currentlyHeldObjectServer;
         if (item == null || !item.isHeld || item.itemProperties == null || !Player.isHoldingObject)
+            item = null;
+        if (terminalUsing && item is Shovel)
             item = null;
 
         if (animatedItem != item)
@@ -205,6 +245,7 @@ internal sealed class BotBody : IDisposable
         DeathAnimation = animation;
         DeathVelocity = velocity;
         SpawnBody = spawnBody;
+        DropAll();
         Dead = true;
         var enemy = EnemyBotContext.Current == Player ? EnemyBotContext.CurrentEnemy : null;
         string attacker = enemy != null ? enemy.enemyType != null && !string.IsNullOrEmpty(enemy.enemyType.enemyName)
@@ -223,18 +264,139 @@ internal sealed class BotBody : IDisposable
         animator.SetBool(Crouching, crouch);
     }
 
+    internal void SetJumping(bool value)
+    {
+        animator.SetBool("Jumping", value);
+    }
+
+    internal void SetEmote(int value)
+    {
+        if (customEmote.Length > 0)
+            value = customApiPlaying ? 0 : betterEmote > 0 ? betterEmote : 1;
+        if (emote == value)
+            return;
+        emote = value;
+        Player.performingEmote = value != 0;
+        animator.SetInteger(EmoteNumber, value);
+    }
+
+    private void RefreshAnimatorLayers()
+    {
+        rightHandLayer = animator.GetLayerIndex("HoldingItemsRightHand");
+        bothHandsLayer = animator.GetLayerIndex("HoldingItemsBothHands");
+        specialAnimationsLayer = animator.GetLayerIndex("SpecialAnimations");
+        emoteLayer = animator.GetLayerIndex("EmotesNoArms");
+    }
+
+    internal void SetCustomEmote(string key)
+    {
+        if (customEmote == key)
+            return;
+        if (customApiPlaying)
+            EmoteCompatibility.StopApi(Player);
+        if (previousEmoteController != null)
+        {
+            animator.runtimeAnimatorController = previousEmoteController;
+            previousEmoteController = null;
+            RefreshAnimatorLayers();
+        }
+        customApiPlaying = false;
+        betterEmote = 0;
+        customEmoteController = null;
+        customEmote = key;
+        emote = -1;
+        if (key.Length == 0)
+        {
+            SetEmote(0);
+            return;
+        }
+        var better = EmoteCompatibility.BetterController(key);
+        int number = EmoteCompatibility.BetterNumber(key);
+        if (better != null && number != 0)
+        {
+            previousEmoteController = animator.runtimeAnimatorController;
+            customEmoteController = better;
+            animator.runtimeAnimatorController = better;
+            RefreshAnimatorLayers();
+            betterEmote = number;
+        }
+        else
+            customApiPlaying = EmoteCompatibility.TryPlayApi(Player, key);
+        nextCustomEmoteRetry = Time.time + 1f;
+        SetEmote(1);
+    }
+
     internal void SetTerminalPose(bool usingTerminal)
     {
         if (terminalUsing == usingTerminal)
             return;
-        terminalUsing = usingTerminal;
         var terminal = UnityEngine.Object.FindObjectOfType<Terminal>();
-        var trigger = terminal != null ? TerminalTrigger(terminal) : null;
+        var trigger = terminal != null ? TerminalTrigger(terminal) ?? terminal.GetComponent<InteractTrigger>() : terminalPoseTrigger;
         if (trigger == null)
+        {
+            if (!usingTerminal)
+            {
+                terminalUsing = false;
+                Player.inTerminalMenu = false;
+                if (Player.currentTriggerInAnimationWith == terminalPoseTrigger)
+                {
+                    Player.currentTriggerInAnimationWith = null;
+                    Player.inSpecialInteractAnimation = false;
+                }
+                terminalPoseTrigger = null;
+                RestoreTerminalItem();
+            }
             return;
+        }
+        terminalUsing = usingTerminal;
+        if (usingTerminal)
+        {
+            if (Player.currentlyHeldObjectServer is Shovel heldWeapon)
+            {
+                terminalPocketedItem = heldWeapon;
+                heldWeapon.PocketItem();
+            }
+            terminalPoseTrigger = trigger;
+            Player.inTerminalMenu = true;
+            Player.inSpecialInteractAnimation = true;
+            Player.currentTriggerInAnimationWith = trigger;
+            SetCrouching(false);
+        }
+        else
+        {
+            Player.inTerminalMenu = false;
+            if (Player.currentTriggerInAnimationWith == terminalPoseTrigger)
+            {
+                Player.currentTriggerInAnimationWith = null;
+                Player.inSpecialInteractAnimation = false;
+            }
+            terminalPoseTrigger = null;
+            RestoreTerminalItem();
+        }
+        if (terminal != null)
+        {
+            if (terminal.terminalLight != null && (usingTerminal || !terminal.terminalInUse))
+                terminal.terminalLight.enabled = usingTerminal;
+            if (terminal.terminalAudio != null)
+            {
+                var clip = usingTerminal ? terminal.enterTerminalSFX : terminal.leaveTerminalSFX;
+                if (clip != null)
+                    terminal.terminalAudio.PlayOneShot(clip);
+            }
+        }
         string animation = usingTerminal ? trigger.animationString : trigger.stopAnimationString;
         if (!string.IsNullOrEmpty(animation))
+        {
+            animator.ResetTrigger(animation);
             animator.SetTrigger(animation);
+        }
+    }
+
+    private void RestoreTerminalItem()
+    {
+        if (terminalPocketedItem != null && terminalPocketedItem == Player.currentlyHeldObjectServer && terminalPocketedItem.isHeld)
+            terminalPocketedItem.EquipItem();
+        terminalPocketedItem = null;
     }
 
     internal void SetLeverPose(bool usingLever)
@@ -251,14 +413,14 @@ internal sealed class BotBody : IDisposable
             animator.SetTrigger(animation);
     }
 
-    internal void SetLook(Vector3 point, float aimSpeed = 160f)
+    internal void SetLook(Vector3 point, float aimSpeed = 320f)
     {
         if ((point - Player.gameplayCamera.transform.position).sqrMagnitude < 0.01f)
             return;
         lookPoint = point;
         Vector3 localDirection = Player.transform.InverseTransformDirection(point - Player.gameplayCamera.transform.position);
         float pitch = Mathf.Clamp(-Mathf.Atan2(localDirection.y, new Vector2(localDirection.x, localDirection.z).magnitude) * Mathf.Rad2Deg, -80f, 80f);
-        lookPitch = Mathf.MoveTowardsAngle(lookPitch, pitch, aimSpeed * Time.deltaTime);
+        lookPitch = Mathf.SmoothDampAngle(lookPitch, pitch, ref lookPitchVelocity, 0.12f, aimSpeed, Time.deltaTime);
         Player.gameplayCamera.transform.rotation = Quaternion.Euler(lookPitch, Player.transform.eulerAngles.y, 0f);
         Player.playerEye.position = Player.gameplayCamera.transform.position;
         Player.playerEye.rotation = Player.gameplayCamera.transform.rotation;
@@ -360,6 +522,30 @@ internal sealed class BotBody : IDisposable
                 slot = index;
         }
         if (slot < 0 && Player.ItemOnlySlot != item && !(Player.ItemOnlySlot is AnimatedItem))
+            slot = 50;
+        if (slot < 0)
+            return;
+        SwitchSlot(Player, slot, null!);
+        SwitchSlotRpc(Player, slot);
+    }
+
+    internal void PocketHeldWeapon()
+    {
+        if (!(Player.currentlyHeldObjectServer is Shovel weapon) || pendingDrop != null)
+            return;
+        int slot = -1;
+        for (int index = 0; index < Player.ItemSlots.Length; index++)
+        {
+            var item = Player.ItemSlots[index];
+            if (item == null)
+            {
+                slot = index;
+                break;
+            }
+            if (slot < 0 && item != weapon && !(item is Shovel))
+                slot = index;
+        }
+        if (slot < 0 && Player.ItemOnlySlot != weapon && !(Player.ItemOnlySlot is Shovel))
             slot = 50;
         if (slot < 0)
             return;
@@ -497,14 +683,10 @@ internal sealed class BotBody : IDisposable
 
     internal bool DropLightningTarget()
     {
-        if (pendingDrop != null)
-            return false;
         GrabbableObject? item = Player.currentlyHeldObjectServer;
-        int targetSlot = Player.currentItemSlot;
         if (!LightningHazard.IsTarget(item))
         {
             item = Player.ItemOnlySlot;
-            targetSlot = 50;
             if (!LightningHazard.IsTarget(item))
             {
                 item = null;
@@ -513,7 +695,6 @@ internal sealed class BotBody : IDisposable
                     if (!LightningHazard.IsTarget(Player.ItemSlots[i]))
                         continue;
                     item = Player.ItemSlots[i];
-                    targetSlot = i;
                     break;
                 }
             }
@@ -523,24 +704,31 @@ internal sealed class BotBody : IDisposable
             return false;
 
         var previous = Player.currentlyHeldObjectServer;
-        int previousSlot = Player.currentItemSlot;
-        if (previous != item)
-        {
-            SwitchSlot(Player, targetSlot, null!);
-            SwitchSlotRpc(Player, targetSlot);
-        }
-
-        if (!Drop(false))
-            return false;
         if (previous != null && previous != item)
         {
-            restoreSlot = previousSlot;
-            restoreItem = previous;
+            ReleaseItem(item);
+            Player.isHoldingObject = true;
+            Player.twoHanded = previous.itemProperties != null && previous.itemProperties.twoHanded;
+            Player.twoHandedAnimation = previous.itemProperties != null && previous.itemProperties.twoHandedAnimation;
         }
+        else
+        {
+            ReleaseItem(item);
+            Player.currentlyHeldObjectServer = null;
+            restoreWeapon = true;
+        }
+        if (pendingDrop == item)
+            pendingDrop = null;
+        if (restoreItem == item)
+        {
+            restoreItem = null;
+            restoreSlot = -1;
+        }
+        Plugin.Log.LogInfo($"Bot {Player.playerClientId} dropped lightning target {item.name}.");
         return true;
     }
 
-    internal void EquipStoredWeapon()
+    internal void EquipStoredWeapon(bool allowWeapon)
     {
         if (pendingDrop != null)
         {
@@ -562,7 +750,7 @@ internal sealed class BotBody : IDisposable
             int previousSlot = restoreSlot;
             restoreSlot = -1;
             restoreItem = null;
-            if (item != null && !LightningHazard.IsTarget(item))
+            if (item != null && (allowWeapon || !(item is Shovel)) && !LightningHazard.IsTarget(item))
             {
                 SwitchSlot(Player, previousSlot, null!);
                 SwitchSlotRpc(Player, previousSlot);
@@ -585,6 +773,8 @@ internal sealed class BotBody : IDisposable
             SwitchSlotRpc(Player, slot);
             return;
         }
+        if (!allowWeapon)
+            return;
         if (Player.ItemOnlySlot is Shovel && !LightningHazard.IsTarget(Player.ItemOnlySlot))
             slot = 50;
         else
@@ -613,7 +803,6 @@ internal sealed class BotBody : IDisposable
                 }
         if (!hasItems)
             return;
-        Player.DropAllHeldItemsNonexactRpc();
         foreach (var item in Player.ItemSlots)
             ReleaseItem(item);
         ReleaseItem(Player.ItemOnlySlot);
@@ -636,9 +825,11 @@ internal sealed class BotBody : IDisposable
         bool aboard = Player.isInHangarShipRoom;
         var parent = aboard ? Player.playersManager.elevatorTransform : Player.playersManager.propsContainer;
         Vector3 floor = item.GetItemFloorPosition(Player.transform.position + Vector3.up * 0.5f);
-        Player.SetObjectAsNoLongerHeld(aboard, aboard, parent.InverseTransformPoint(floor), item);
+        Vector3 localFloor = parent.InverseTransformPoint(floor);
+        Player.SetObjectAsNoLongerHeld(aboard, aboard, localFloor, item);
         item.isInFactory = Player.isInsideFactory;
         item.DiscardItem();
+        Plugin.SyncBotDroppedItem(Player, item, localFloor, aboard, Player.isInsideFactory);
     }
 
     internal bool UseKey(DoorLock door)
@@ -654,6 +845,14 @@ internal sealed class BotBody : IDisposable
 
     public void Dispose()
     {
+        SetCustomEmote(string.Empty);
+        SetEmote(0);
+        Player.emoteLayerWeight = 0f;
+        if (emoteLayer >= 0)
+            animator.SetLayerWeight(emoteLayer, 0f);
+        SetJumping(false);
+        if (terminalUsing)
+            SetTerminalPose(false);
         active.Remove(Player);
         if (Player == null || !Player.IsOwnedByServer ||
             Player.playersManager != null && Player.playersManager.ClientPlayerList.ContainsValue((int)Player.playerClientId))

@@ -1,6 +1,8 @@
 # Lethal Fake Client
 
-A BepInEx 5 mod for Lethal Company. The host runs one adaptive Director and uses available player bodies for the crew. The mod has no dependency on LethalBots or other bot mods.
+A BepInEx 5 mod for Lethal Company. The host runs one adaptive Director and uses available player bodies for the crew. The mod has no dependency on other mods.
+
+This project is experimental. A successful build or automated check does not establish that gameplay, multiplayer synchronization, or optional mod integrations work in every game version or mod setup.
 
 ## Requirements and build
 
@@ -24,7 +26,11 @@ The dependency-free policy checks can be run without the game assemblies:
 dotnet run --project tests/PolicyChecks/PolicyChecks.csproj -c Release
 ```
 
-These checks do not simulate Unity navigation or multiplayer gameplay.
+GitHub Actions runs these checks and the emote compatibility checks without proprietary game assemblies. It does not build the plugin or simulate Unity navigation or multiplayer gameplay; build the plugin locally against your game installation.
+
+Optional emote discovery can also be checked with `dotnet run --project tests/EmoteCompatibilityChecks/EmoteCompatibilityChecks.csproj -c Release`.
+
+Idle ship bots can use installed BetterEmotes and LethalEmotesAPI animations. These integrations are optional; peers without a selected animation see the vanilla fallback. Compatible peers need the same bot-mod protocol version, and matching emote mods and packs to see the same custom animation.
 
 ## Run it
 
@@ -38,11 +44,11 @@ ModelReplacementAPI is optional. When it is installed, bots can use its register
 
 ## License
 
-No license has been selected for this repository. Game and mod-loader assemblies remain the property of their respective owners.
+The project is licensed under the [GNU General Public License v3.0 only](LICENSE) (GPL-3.0-only). Lethal Company, BepInEx, and optional third-party mods are distributed separately under their own licenses.
 
 ## How the crew works
 
-The Director uses one round blackboard and plans on task results, crew changes, and periodic validation. It records crew exploration during the round and prioritizes unvisited destinations. Bots choose among available suits, favoring those least used by the crew. Outdoor exploration is independent. After the crew observes a threat, bots can form pairs inside the facility; a pair dissolves as soon as either bot leaves. Bots reserve scrap and bodies, escort partners, collect visible nearby scrap while inventory space and safety allow, stage it at facility exits, and deliver batches of at least four to the ship center, or shelter when the Director finds no useful safe task. Nearby threats interrupt tasks and trigger evasive movement. Indoors, bots try to reach a safe exit and avoid routes that pass close to the threat; if no exit route is safe, they first try to create distance. Entrances used to flee or found unsafe are temporarily shared with the crew, which can choose a different safe entrance. The Director reserves a guardian while an observed outdoor threat remains credible. It prefers bots already aboard and can replace an unavailable guardian. A dangerous or blocked return can delay coverage.
+The Director uses one round blackboard and plans on task results, crew changes, and periodic validation. It records crew exploration during the round and prioritizes unvisited destinations. Bots choose among available suits, favoring those least used by the crew. Outdoor exploration is independent. After the crew observes an indoor threat, bots can form pairs inside the facility; a pair dissolves as soon as either bot leaves. Bots reserve scrap and bodies, escort partners, collect visible nearby scrap while inventory space and safety allow, stage it at facility exits, and deliver batches of at least four to the ship center, or shelter when the Director finds no useful safe task. Nearby threats interrupt tasks and trigger evasive movement. Indoors, bots try to reach a safe exit and avoid routes that pass close to the threat; if no exit route is safe, they first try to create distance. Entrances used to flee or found unsafe are temporarily shared with the crew, which can choose a different safe entrance. When at least two bots are available and ship support is enabled, the most injured bot is assigned to ship support; an existing guardian can maintain coverage while a replacement returns. A dangerous or blocked return can delay coverage.
 
 The mod discovers vanilla and modded `EnemyAI` instances through the runtime registry and observes line of sight, movement, target, and indoor or outdoor context. For other enemy implementations, register a component and an `IThreatAdapter` via `ThreatSources.Register` on the Unity thread. Return a `ThreatSample` with the current position, zone, life status, and optional pursued player. Unregister the component when removing it.
 
@@ -50,14 +56,21 @@ Task outcomes, scrap value and delivery time, route failures, and observed encou
 
 The host owns movement, task decisions, and learning. Clients receive versioned crew snapshots through Unity Netcode named messages and interpolate bot poses. Scrap pickup and drop use the game's inventory and network paths. The crew uses grounded NavMesh paths, facility entrances, ordinary and keyed doors, and the mineshaft elevator. Failed routes get a bounded retry before the target is temporarily avoided. Known mines, turrets, and quicksand are recorded and avoided; the game navigation mesh is used for walkable routes. Known hazards are represented by temporary NavMesh obstacles, which can also affect other NavMesh agents. While someone is inside the facility, a ship operator can cycle the radar, use terminal-accessible hazards or doors near crew members, and use an available ship teleporter for an observed immediate emergency. Teleporting drops the target’s equipment as in the game. Bots swing shovels and signs at close threats without deliberately stopping or pursuing them. The host handles bot damage and creates networked, recoverable bodies when the game's death type permits them; collision-based enemies use bot-aware targeting. Enemies with unusual custom attack code may require additional compatibility work. Lightning targets are dropped and avoided. Maps with disconnected navigation can still prevent travel.
 
+In the mineshaft entrance room, exploring bots select an unvisited lower-floor destination and use the elevator when it is available. They try its navigable interior first and fall back to controlled boarding when the cabin has no navigation mesh. Elevator travel and modded mineshafts need in-game testing.
+
+The Director remembers observed indoor scrap for the current round, considers estimated delivery distance when ranking it, and shares temporary route and death risks. Nearby bots can hand off keys or spare shovels when needed. An elevator operator waits briefly for nearby bots travelling to the same floor when conditions are safe.
+
 ## Configuration
 
 BepInEx creates `BepInEx/config/dev.lethalfakeclient.cfg` after the first launch. The host controls bot decisions.
 
 - `Crew.BotLimit`: maximum bots (0–128; available player slots still apply).
+- `Crew.RandomSteamAvatars`: show Steam profile pictures for dead bots in the spectator UI (default disabled; host setting). IDs are selected without duplicates from the host's Steam friends who are not playing Lethal Company or connected to the lobby. If no unused profile is available, the bot uses the default picture. Other peers need the same plugin version.
 - `Perception.ViewAngle`: horizontal view angle in degrees (60–360).
 - `Behavior.RiskTolerance`: risk tolerance (0.5–1.5).
 - `Behavior.CollectItems`, `RecoverBodies`, `DefendWithWeapons`, `ShipSupport`: enable the corresponding behaviors.
+- `Behavior.ShipSupportStartHour`: earliest ship-operator time on the 24-hour game clock (6–24; default 14).
+- `Behavior.CollectDropshipDeliveries`: assign an available nearby bot to open the landed dropship and carry ordered items to the ship (default enabled).
 - `Extraction.ReturnHour`: ship return time on the 24-hour game clock, from 6 to 24; default 22.
 - `Extraction.ReturnEarlierAfterDeaths`: move the return time earlier in proportion to crew deaths; enabled by default.
 
@@ -81,9 +94,9 @@ A Hoarding Bug does not trigger threat responses until it enters its attack/chas
 
 When an indoor Jester starts cranking, all indoor bots try to evacuate through a reachable safe exit. They remain outside while it is cranking or hunting and can enter again after it resets. Immediate hazards can still interrupt the evacuation.
 
-The shared hazard map records observed enemies, mines and turrets for route decisions. Indoor bots periodically plan a reachable exit and recheck it when evacuation starts; if no planned route is available, they fall back to the existing escape search. Near departure, the Director estimates the remaining real time and travel distance, accounting for carried weight and cargo value before selecting another outdoor item. An early departure vote also changes this estimate.
+The shared hazard map records observed enemies, mines and turrets for route decisions. Indoor bots periodically plan a reachable exit and recheck it when evacuation starts; if no planned route is available, they fall back to the existing escape search. Near departure, the Director estimates the remaining real time and travel distance, accounting for carried weight and cargo value before selecting another outdoor item. The first early departure vote recalls the crew to the ship, while the game continues to control the actual departure vote.
 
-The configured extraction threshold moves earlier in proportion to deaths among crew who participated in the round when early return is enabled, excluding unused slots. Each quarter of the crew lost moves it one game hour earlier, up to four hours; revived crew no longer count as dead. Disconnections do not count as deaths. Once extraction begins, the usual ship-area collection rules apply. The game's automatic departure and travel-time safety checks still apply. Group mode starts when an enemy is detected and ends after 30 seconds without a new detection; mines and turrets do not directly trigger it. A ship operator can also report an enemy near the radar target without line of sight. Enemy sightings and group state reset between rounds, while learned outcome statistics persist.
+The configured extraction threshold moves earlier in proportion to deaths among crew who participated in the round when early return is enabled, excluding unused slots. Each quarter of the crew lost moves it one game hour earlier, up to four hours; revived crew no longer count as dead. Disconnections do not count as deaths. Once extraction begins, the usual ship-area collection rules apply. The game's automatic departure and travel-time safety checks still apply. Indoor group mode starts after an indoor enemy is observed and ends after 12 seconds without a new sighting. Outdoor enemies, unspawned enemies, mines, turrets and neutral area hazards do not directly trigger indoor grouping. Enemy sightings and group state reset between rounds, while learned outcome statistics persist.
 
 On leaving a facility, bots search around the normal exit point for a clear landing connected to outside navigation nodes. If no verified landing can be found, they retry or choose another exit. Maps without outside nodes use the normal exit point when it is clear.
 
